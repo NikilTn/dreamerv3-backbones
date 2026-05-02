@@ -45,6 +45,16 @@ def make_env(config, id):
 
         env = MemoryMaze(task, seed=config.seed + id)
         env = wrappers.OneHotAction(env)
+    elif suite == "bsuite":
+        from envs.bsuite import BSuite
+
+        env = BSuite(task, seed=config.seed + id)
+        env = wrappers.OneHotAction(env)
+    elif suite == "popgym":
+        from envs.popgym import POPGym
+
+        env = POPGym(task, seed=config.seed + id)
+        env = wrappers.OneHotAction(env)
     elif suite == "crafter":
         import envs.crafter as crafter
 

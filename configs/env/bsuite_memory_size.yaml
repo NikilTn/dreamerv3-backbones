@@ -1,0 +1,17 @@
+task: bsuite_memory_size/0
+steps: 5e5
+env_num: 1
+eval_episode_num: 10
+action_repeat: 1
+train_ratio: 1024
+time_limit: 1000
+
+seed: ${seed}
+device: ${device}
+
+encoder:
+  mlp_keys: 'vector'
+  cnn_keys: '$^'
+decoder:
+  mlp_keys: 'vector'
+  cnn_keys: '$^'

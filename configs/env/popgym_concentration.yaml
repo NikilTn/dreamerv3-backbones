@@ -1,0 +1,17 @@
+task: popgym_ConcentrationEasy-v0
+steps: 1e6
+env_num: 1
+eval_episode_num: 10
+action_repeat: 1
+train_ratio: 512
+time_limit: 1024
+
+seed: ${seed}
+device: ${device}
+
+encoder:
+  mlp_keys: 'vector'
+  cnn_keys: '$^'
+decoder:
+  mlp_keys: 'vector'
+  cnn_keys: '$^'
