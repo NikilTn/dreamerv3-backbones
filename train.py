@@ -1,6 +1,7 @@
 import atexit
 import pathlib
 import sys
+import time
 import warnings
 
 import hydra
@@ -25,12 +26,35 @@ def main(config):
         tools.enable_deterministic_run()
     logdir = pathlib.Path(config.logdir).expanduser()
     logdir.mkdir(parents=True, exist_ok=True)
+    start_time = time.time()
 
     # Mirror stdout/stderr to a file under logdir while keeping console output.
     console_f = tools.setup_console_log(logdir, filename="console.log")
     atexit.register(lambda: console_f.close())
 
     print("Logdir", logdir)
+    tools.save_resolved_config(logdir, config)
+    tools.update_run_metadata(
+        logdir,
+        status="running",
+        start_time_unix=start_time,
+        seed=int(config.seed),
+        device=str(config.device),
+        env_name=str(config.env.task),
+        model_backbone=str(config.model.backbone),
+        rep_loss=str(config.model.rep_loss),
+        cpc_enabled=bool(config.model.cpc.enabled),
+        sampling_strategy=str(config.buffer.sampling.strategy),
+        subexp=(
+            "cpc_dfs"
+            if bool(config.model.cpc.enabled) and str(config.buffer.sampling.strategy) == "dfs"
+            else "cpc"
+            if bool(config.model.cpc.enabled)
+            else "dfs"
+            if str(config.buffer.sampling.strategy) == "dfs"
+            else "none"
+        ),
+    )
 
     logger = tools.Logger(logdir)
     # save config
@@ -47,15 +71,33 @@ def main(config):
         obs_space,
         act_space,
     ).to(config.device)
+    try:
+        policy_trainer = OnlineTrainer(config.trainer, replay_buffer, logger, logdir, train_envs, eval_envs)
+        policy_trainer.begin(agent)
 
-    policy_trainer = OnlineTrainer(config.trainer, replay_buffer, logger, logdir, train_envs, eval_envs)
-    policy_trainer.begin(agent)
-
-    items_to_save = {
-        "agent_state_dict": agent.state_dict(),
-        "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
-    }
-    torch.save(items_to_save, logdir / "latest.pt")
+        items_to_save = {
+            "agent_state_dict": agent.state_dict(),
+            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+        }
+        torch.save(items_to_save, logdir / "latest.pt")
+        end_time = time.time()
+        tools.update_run_metadata(
+            logdir,
+            status="completed",
+            end_time_unix=end_time,
+            elapsed_seconds=end_time - start_time,
+            trainer_steps=float(config.trainer.steps),
+        )
+    except Exception:
+        end_time = time.time()
+        tools.update_run_metadata(
+            logdir,
+            status="failed",
+            end_time_unix=end_time,
+            elapsed_seconds=end_time - start_time,
+            trainer_steps=float(config.trainer.steps),
+        )
+        raise
 
 
 if __name__ == "__main__":

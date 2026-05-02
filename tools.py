@@ -4,6 +4,7 @@ import json
 import os
 import random
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -61,6 +62,30 @@ def setup_console_log(logdir, filename="console.log"):
     return f
 
 
+def save_resolved_config(logdir, config, basename="resolved_config"):
+    """Save a resolved Hydra config to YAML and JSON for downstream analysis."""
+    from omegaconf import OmegaConf
+
+    logdir = Path(logdir)
+    container = OmegaConf.to_container(config, resolve=True)
+    with (logdir / f"{basename}.yaml").open("w") as f:
+        f.write(OmegaConf.to_yaml(config, resolve=True))
+    with (logdir / f"{basename}.json").open("w") as f:
+        json.dump(container, f, indent=2, sort_keys=True)
+
+
+def update_run_metadata(logdir, **kwargs):
+    """Merge run metadata fields into logdir/run_metadata.json."""
+    path = Path(logdir) / "run_metadata.json"
+    data = {}
+    if path.exists():
+        with path.open() as f:
+            data = json.load(f)
+    data.update(kwargs)
+    with path.open("w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+
+
 def to_np(x):
     return x.detach().cpu().numpy()
 
@@ -85,6 +110,9 @@ def weight_init_(m, fan_type="in"):
         return
 
     if weight.numel() == 0:
+        return
+
+    if weight.dim() < 2:
         return
 
     # This is a torch private API, but widely used and stable.

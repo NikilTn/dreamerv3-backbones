@@ -10,10 +10,10 @@ from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
 
 import networks
-import rssm
 import tools
 from networks import Projector
 from optim import LaProp, clip_grad_agc_
+from rssm_factory import build_rssm
 from tools import to_f32
 
 
@@ -29,16 +29,14 @@ class Dreamer(nn.Module):
         self.return_ema = networks.ReturnEMA(device=self.device)
         self.act_dim = act_space.n if hasattr(act_space, "n") else sum(act_space.shape)
         self.rep_loss = str(config.rep_loss)
+        self._amp_enabled = self.device.type == "cuda"
+        self.cpc_enabled = bool(config.cpc.enabled)
 
         # World model components
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
         self.encoder = networks.MultiEncoder(config.encoder, shapes)
         self.embed_size = self.encoder.out_dim
-        self.rssm = rssm.RSSM(
-            config.rssm,
-            self.embed_size,
-            self.act_dim,
-        )
+        self.rssm = build_rssm(config, self.embed_size, self.act_dim)
         self.reward = networks.MLPHead(config.reward, self.rssm.feat_size)
         self.cont = networks.MLPHead(config.cont, self.rssm.feat_size)
 
@@ -122,6 +120,39 @@ class Dreamer(nn.Module):
                 "ema_encoder": self._ema_encoder,
                 "ema_obs_proj": self._ema_obs_proj,
             })
+        if self.cpc_enabled:
+            cpc = config.cpc
+            hidden_dim = int(cpc.hidden_dim)
+            proj_dim = int(cpc.proj_dim)
+            act = getattr(torch.nn, config.act)
+            self.cpc_horizon = int(cpc.horizon)
+            self.cpc_temperature = float(cpc.temperature)
+            self.cpc_aug_max_delta = float(cpc.aug.max_delta)
+            self.cpc_aug_same_across_time = bool(cpc.aug.same_across_time)
+            self.cpc_aug_bilinear = bool(cpc.aug.bilinear)
+            self.cpc_pred_heads = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(self.rssm.feat_size, hidden_dim),
+                        nn.RMSNorm(hidden_dim, eps=1e-04, dtype=torch.float32),
+                        act(),
+                        nn.Linear(hidden_dim, proj_dim),
+                    )
+                    for _ in range(self.cpc_horizon)
+                ]
+            )
+            self.cpc_target_heads = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(self.embed_size, hidden_dim),
+                        nn.RMSNorm(hidden_dim, eps=1e-04, dtype=torch.float32),
+                        act(),
+                        nn.Linear(hidden_dim, proj_dim),
+                    )
+                    for _ in range(self.cpc_horizon)
+                ]
+            )
+            modules.update({"cpc_pred_heads": self.cpc_pred_heads, "cpc_target_heads": self.cpc_target_heads})
         # count number of parameters in each module
         for key, module in modules.items():
             if isinstance(module, nn.Parameter):
@@ -147,7 +178,7 @@ class Dreamer(nn.Module):
             betas=(config.beta1, config.beta2),
             eps=config.eps,
         )
-        self._scaler = GradScaler()
+        self._scaler = GradScaler(enabled=self._amp_enabled)
 
         def lr_lambda(step):
             if config.warmup:
@@ -158,9 +189,14 @@ class Dreamer(nn.Module):
 
         self.train()
         self.clone_and_freeze()
-        if config.compile:
+        self._compile_enabled = bool(config.compile) and self.device.type == "cuda"
+        if self._compile_enabled:
             print("Compiling update function with torch.compile...")
             self._cal_grad = torch.compile(self._cal_grad, mode="reduce-overhead")
+
+    def _mark_step_begin(self):
+        if self.device.type == "cuda" and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            torch.compiler.cudagraph_mark_step_begin()
 
     def _update_slow_target(self):
         """Update slow-moving value target network."""
@@ -246,7 +282,7 @@ class Dreamer(nn.Module):
     def act(self, obs, state, eval=False):
         """Policy inference step."""
         # obs: dict of (B, *), state: (stoch: (B, S, K), deter: (B, D), prev_action: (B, A))
-        torch.compiler.cudagraph_mark_step_begin()
+        self._mark_step_begin()
         p_obs = self.preprocess(obs)
         # (B, E)
         embed = self._frozen_encoder(p_obs)
@@ -275,7 +311,7 @@ class Dreamer(nn.Module):
 
     @torch.no_grad()
     def video_pred(self, data, initial):
-        torch.compiler.cudagraph_mark_step_begin()
+        self._mark_step_begin()
         p_data = self.preprocess(data)
         return self._video_pred(p_data, initial)
 
@@ -309,15 +345,20 @@ class Dreamer(nn.Module):
 
     def update(self, replay_buffer):
         """Sample a batch from replay and perform one optimization step."""
-        data, index, initial = replay_buffer.sample()
-        torch.compiler.cudagraph_mark_step_begin()
+        data, index, initial, replay_metrics = replay_buffer.sample()
+        self._mark_step_begin()
         p_data = self.preprocess(data)
         self._update_slow_target()
         if self.rep_loss == "dreamerpro":
             self.ema_update()
+        policy_start = None
+        policy_metrics = {}
+        if getattr(replay_buffer, "strategy", "uniform") == "dfs":
+            batch_shape = p_data.shape
+            policy_start, policy_metrics = replay_buffer.sample_policy_starts(int(batch_shape[0] * batch_shape[1]))
         metrics = {}
-        with autocast(device_type=self.device.type, dtype=torch.float16):
-            (stoch, deter), mets = self._cal_grad(p_data, initial)
+        with autocast(device_type=self.device.type, dtype=torch.float16, enabled=self._amp_enabled):
+            (stoch, deter), mets = self._cal_grad(p_data, initial, policy_start)
         self._scaler.unscale_(self._optimizer)  # unscale grads in params
         if self.rep_loss == "dreamerpro" and self._ema_updates < self.freeze_prototypes_iters:
             self._prototypes.grad.zero_()
@@ -341,12 +382,14 @@ class Dreamer(nn.Module):
             params_rms = tools.compute_rms(self._named_params.values())
             mets["opt/param_rms"] = params_rms
             mets["opt/update_rms"] = update_rms
+        metrics.update(replay_metrics)
+        metrics.update(policy_metrics)
         metrics.update(mets)
         # update latent vectors in replay buffer
         replay_buffer.update(index, stoch.detach(), deter.detach())
         return metrics
 
-    def _cal_grad(self, data, initial):
+    def _cal_grad(self, data, initial, policy_start=None):
         """Compute gradients for one batch.
 
         Notes
@@ -425,6 +468,8 @@ class Dreamer(nn.Module):
             losses.update(proto_losses)
         else:
             raise NotImplementedError
+        if self.cpc_enabled:
+            losses["cpc"] = self.cpc_loss(data, feat, post_stoch, post_deter)
 
         # reward and continue
         losses["rew"] = torch.mean(-self.reward(feat).log_prob(to_f32(data["reward"])))
@@ -436,10 +481,13 @@ class Dreamer(nn.Module):
 
         # === Imagination rollout for actor-critic ===
         # (B*T, S, K), (B*T, D)
-        start = (
-            post_stoch.reshape(-1, *post_stoch.shape[2:]).detach(),
-            post_deter.reshape(-1, *post_deter.shape[2:]).detach(),
-        )
+        if policy_start is None:
+            start = (
+                post_stoch.reshape(-1, *post_stoch.shape[2:]).detach(),
+                post_deter.reshape(-1, *post_deter.shape[2:]).detach(),
+            )
+        else:
+            start = (policy_start[0].detach(), policy_start[1].detach())
         # (B, T, ...) -> (B*T, ...)
         imag_feat, imag_action = self._imagine(start, self.imag_horizon + 1)
         imag_feat, imag_action = imag_feat.detach(), imag_action.detach()
@@ -565,11 +613,62 @@ class Dreamer(nn.Module):
             out.append(interm[:, i] + live[:, i] * cont[:, i] * out[-1])
         return torch.stack(list(reversed(out))[:-1], 1)
 
+    def cpc_loss(self, data, feat, post_stoch, post_deter):
+        """Action-conditioned CPC over real latent states and augmented encodings."""
+        aug_data = self.augment_cpc_data(data)
+        target_embed = self.encoder(aug_data)
+        B, T = target_embed.shape[:2]
+        horizon = min(self.cpc_horizon, T)
+        losses = []
+
+        for k in range(horizon):
+            if k == 0:
+                pred_feat = feat
+                target = target_embed
+            else:
+                pred_feat = self.rollout_actions(post_stoch[:, : T - k], post_deter[:, : T - k], data["action"], k)
+                target = target_embed[:, k:]
+
+            pred = self.cpc_pred_heads[k](pred_feat.reshape(-1, pred_feat.shape[-1]))
+            target = self.cpc_target_heads[k](target.reshape(-1, target.shape[-1]))
+            pred = F.normalize(pred, p=2, dim=-1)
+            target = F.normalize(target, p=2, dim=-1)
+            logits = torch.matmul(pred, target.T) / self.cpc_temperature
+            labels = torch.arange(logits.shape[0], device=logits.device)
+            losses.append(F.cross_entropy(logits, labels))
+
+        return torch.stack(losses).mean()
+
+    def rollout_actions(self, stoch, deter, actions, horizon):
+        """Roll out the world model for `horizon` real actions from every valid start state."""
+        B, valid_steps = stoch.shape[:2]
+        stoch = stoch.reshape(-1, *stoch.shape[2:])
+        deter = deter.reshape(-1, deter.shape[-1])
+        for step in range(horizon):
+            action = actions[:, step : step + valid_steps].reshape(-1, actions.shape[-1])
+            stoch, deter = self.rssm.img_step(stoch, deter, action)
+        feat = self.rssm.get_feat(stoch, deter)
+        return feat.reshape(B, valid_steps, -1)
+
     @torch.no_grad()
     def preprocess(self, data):
         if "image" in data:
             data["image"] = to_f32(data["image"]) / 255.0
         return data
+
+    @torch.no_grad()
+    def augment_cpc_data(self, data):
+        data_aug = {k: v.clone() for k, v in data.items()}
+        if "image" in data_aug:
+            image = data_aug["image"].permute(0, 1, 4, 2, 3)
+            data_aug["image"] = self.random_translate(
+                image,
+                self.cpc_aug_max_delta,
+                same_across_time=self.cpc_aug_same_across_time,
+                bilinear=self.cpc_aug_bilinear,
+            )
+            data_aug["image"] = data_aug["image"].permute(0, 1, 3, 4, 2)
+        return data_aug
 
     @torch.no_grad()
     def augment_data(self, data):
