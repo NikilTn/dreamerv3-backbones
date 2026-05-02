@@ -1,6 +1,7 @@
 defaults:
   - env: dmc_vision
   - model: size12M
+  - subexp: none
   # Disable Hydra's Python logging-to-file (train.log)
   - override hydra/job_logging: disabled
   - _self_
@@ -23,6 +24,15 @@ buffer:
   max_size: 5e5
   device: ${device}
   storage_device: 'cuda:0'
+  sampling:
+    strategy: uniform # uniform|dfs
+    dfs:
+      alpha: 1.0
+      beta: 0.0
+      eps: 1e-8
+      world_temperature: 1.0
+      policy_temperature: 1.0
+      priority_clip: 50.0
 
 trainer:
   steps: ${env.steps}

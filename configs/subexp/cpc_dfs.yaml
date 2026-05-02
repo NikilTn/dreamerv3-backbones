@@ -1,0 +1,7 @@
+model:
+  cpc:
+    enabled: true
+
+buffer:
+  sampling:
+    strategy: dfs
