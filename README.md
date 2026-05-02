@@ -32,6 +32,32 @@ Switching algorithms:
 python3 train.py model.rep_loss=r2dreamer
 ```
 
+Switching world-model backbones:
+
+```bash
+# Choose a backbone via model.backbone:
+# gru|rssm|transformer|storm|mamba|mamba2|s4|s3m|s5
+python3 train.py model.backbone=transformer
+```
+
+Switching proposal sub-experiments:
+
+```bash
+# Choose a subexperiment via Hydra config group:
+# none|cpc|dfs|cpc_dfs
+python3 train.py subexp=cpc
+python3 train.py subexp=dfs
+python3 train.py subexp=cpc_dfs
+```
+
+You can also set the raw config flags directly:
+
+```bash
+python3 train.py model.cpc.enabled=true
+python3 train.py buffer.sampling.strategy=dfs
+python3 train.py model.cpc.enabled=true buffer.sampling.strategy=dfs
+```
+
 For easier code reading, inline tensor shape annotations are provided. See [`docs/tensor_shapes.md`](docs/tensor_shapes.md).
 
 
@@ -45,6 +71,8 @@ At the moment, the following benchmarks are available in this repository.
 | [DMC Vision](https://github.com/deepmind/dm_control) | Image | Continuous |1M| DeepMind Control Suite with high-dimensional images inputs. |
 | [DMC Subtle](envs/dmc_subtle.py) | Image | Continuous |1M| DeepMind Control Suite with tiny task-relevant objects. |
 | [Atari 100k](https://github.com/Farama-Foundation/Arcade-Learning-Environment) | Image | Discrete |400K| 26 Atari games. |
+| [BSuite](https://github.com/google-deepmind/bsuite) | Vector | Discrete | User-defined | Memory-length, memory-size, and discounting-chain diagnostics. |
+| [POPGym](https://pypi.org/project/popgym/) | Vector | Discrete | User-defined | Memory-intensive POMDP tasks like RepeatPrevious, Autoencode, and Concentration. |
 | [Crafter](https://github.com/danijar/crafter) | Image | Discrete |1M| Survival environment to evaluates diverse agent abilities.|
 | [Memory Maze](https://github.com/jurgisp/memory-maze) | Image |Discrete |100M| 3D mazes to evaluate RL agents' long-term memory.|
 
@@ -53,6 +81,90 @@ Use Hydra to select a benchmark and a specific task using `env` and `env.task`, 
 ```bash
 python3 train.py ... env=dmc_vision env.task=dmc_walker_walk
 ```
+
+Proposal benchmark quick start:
+
+```bash
+# Atari 100k baseline/backbone sweeps
+python3 train.py env=atari100k model.backbone=gru env.task=atari_pong
+python3 train.py env=atari100k model.backbone=transformer env.task=atari_pong
+
+# BSuite memory diagnostics
+python3 train.py env=bsuite_memory_len model.backbone=s5
+python3 train.py env=bsuite_memory_size model.backbone=mamba
+python3 train.py env=bsuite_discounting_chain model.backbone=transformer
+
+# POPGym memory tasks
+python3 train.py env=popgym_repeat_previous model.backbone=transformer
+python3 train.py env=popgym_autoencode model.backbone=s4
+python3 train.py env=popgym_concentration model.backbone=s5
+
+# CPC and DFS ablations
+python3 train.py env=atari100k model.backbone=transformer subexp=cpc env.task=atari_pong
+python3 train.py env=atari100k model.backbone=mamba2 subexp=dfs env.task=atari_pong
+python3 train.py env=atari100k model.backbone=transformer subexp=cpc_dfs env.task=atari_pong
+```
+
+## HPC Quick Start
+
+Use Python 3.11 on the cluster. `bsuite` currently does not install on Python 3.13, so the proposal benchmark stack should be created in a Python 3.11 environment.
+
+```bash
+git clone <your-fork-or-copy> dreamerv3
+cd dreamerv3
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -U pip wheel
+pip install -r requirements.txt
+python scripts/verify_setup.py
+```
+
+Example backbone sweep command template:
+
+```bash
+python3 train.py \
+  env=popgym_repeat_previous \
+  subexp=none \
+  model.backbone=transformer \
+  seed=0 \
+  logdir=./logdir/proposal/popgym_repeat_previous/none/transformer/seed0
+```
+
+To compare backbones fairly, keep `env`, `env.task`, `model` size, `trainer.steps`, and the seed list fixed while only changing `model.backbone` and, when relevant, the `subexp` preset.
+
+## Sweep and Analysis Scripts
+
+Build a backbone sweep job list:
+
+```bash
+python scripts/build_proposal_sweep.py \
+  --write-joblist joblists/proposal.txt \
+  --root-logdir ./logdir/proposal \
+  --subexps none cpc dfs cpc_dfs
+```
+
+Run a whole job list locally:
+
+```bash
+python scripts/run_joblist.py joblists/proposal.txt --all
+```
+
+Run the generated commands on SLURM as an array:
+
+```bash
+wc -l joblists/proposal.txt
+sbatch --array=0-9 scripts/slurm_array_template.sh joblists/proposal.txt
+```
+
+Aggregate completed runs into CSV summaries and plots:
+
+```bash
+python scripts/analyze_proposal_results.py \
+  --logdir-root ./logdir/proposal \
+  --output-dir ./logdir/proposal/analysis
+```
+
+For the full implementation notes, workflow details, and remaining research steps, see [`docs/proposal_backbone_workflow.md`](docs/proposal_backbone_workflow.md).
 
 ## Headless rendering
 
