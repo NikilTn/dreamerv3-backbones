@@ -557,3 +557,66 @@ checkpoints/repeat_previous_reduced_20260504_004958/eval_20ep_20260505/eval_summ
   `500k` toward a `1M` run should keep `trainer.steps=1000000`.
 - Exact replay-buffer checkpointing was left off by default because it would be
   large: potentially many GB per run and TB-scale over full sweeps.
+
+### 2026-05-05 12:49 PDT Training Progress Snapshot
+
+SSH access through the `hpc2` control socket is working. Checked `squeue`,
+`run_metadata.json`, `metrics.jsonl`, and checkpoint files under:
+
+```text
+~/dreamerv3/logdir/repeat_previous_reduced_20260504_004958
+```
+
+Overall reduced sweep status:
+
+- Completed full runs: 29 of 45.
+- Actively running: 5.
+- Pending/not-started: 10.
+- Failed: 1.
+- Local downloaded final checkpoints: 25, so local is behind by 4 completed
+  final checkpoints.
+
+Newly completed since the previous local download:
+
+- `RepeatPreviousMedium-v0 / s5 / seed3`
+- `RepeatPreviousMedium-v0 / s5 / seed4`
+- `RepeatPreviousHard-v0 / gru / seed0`
+- `RepeatPreviousHard-v0 / gru / seed1`
+
+Running jobs:
+
+- `38888_7` on `condo11`:
+  `RepeatPreviousEasy-v0 / s3m / seed2`, about 929k steps, about 53.0 fps,
+  estimated about 22 minutes remaining.
+- `38888_8` on `condo10`:
+  `RepeatPreviousEasy-v0 / s3m / seed3`, about 883k steps, about 47.0 fps,
+  estimated about 41 minutes remaining.
+- `39051_11` on `g19`:
+  `RepeatPreviousHard-v0 / gru / seed2`, about 785k steps, about 75.6 fps,
+  estimated about 47 minutes remaining. This run has periodic checkpoints.
+- `39051_12` on `g18`:
+  `RepeatPreviousHard-v0 / gru / seed3`, about 531k steps, about 75.3 fps,
+  estimated about 104 minutes remaining. This run has periodic checkpoints.
+- `39051_13` on `g24`:
+  `RepeatPreviousHard-v0 / gru / seed4`, about 13k steps, about 69.3 fps,
+  estimated about 4 hours remaining.
+
+Pending jobs:
+
+- `39051_14..39051_18`: `RepeatPreviousHard-v0 / s3m / seed0..4`.
+- `39051_19..39051_23`: `RepeatPreviousHard-v0 / s5 / seed0..4`.
+- Slurm reason at this snapshot: `Priority`.
+
+Failed job:
+
+- `RepeatPreviousEasy-v0 / s3m / seed4` failed earlier with OOM at
+  `batch_size=384`.
+- The separate rerun job `38902` is no longer visible in `squeue` or user
+  accounting from this login, so it is not active at this snapshot.
+
+Important checkpoint note:
+
+- Remote has 31 `latest.pt` files, but with periodic checkpointing this includes
+  partial/resumable checkpoints from currently running Hard/GRU jobs. Use
+  `run_metadata.json` status, not `latest.pt` count alone, to decide what is
+  complete.
