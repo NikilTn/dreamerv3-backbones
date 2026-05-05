@@ -1,4 +1,3 @@
-import contextlib
 import io
 import json
 import os
@@ -10,7 +9,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import init as nn_init
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 
 class Tee(io.TextIOBase):
@@ -144,16 +143,35 @@ class CudaBenchmark:
 
 
 class Logger:
-    def __init__(self, logdir, filename="metrics.jsonl"):
-        self._logdir = logdir
+    def __init__(self, logdir, filename="metrics.jsonl", wandb_config=None):
+        self._logdir = Path(logdir)
         self._filename = filename
-        self._writer = SummaryWriter(log_dir=str(logdir), max_queue=1000)
         self._last_step = None
         self._last_time = None
         self._scalars = {}
         self._images = {}
         self._videos = {}
         self._histograms = {}
+
+        from omegaconf import DictConfig, OmegaConf
+
+        if wandb_config is None:
+            wb = {}
+        elif isinstance(wandb_config, DictConfig):
+            wb = OmegaConf.to_container(wandb_config, resolve=True) or {}
+        else:
+            wb = dict(wandb_config)
+        # Default run name from the last two path components (e.g. "2026-05-04/12-34-56").
+        default_name = "/".join(self._logdir.parts[-2:]) if len(self._logdir.parts) >= 2 else self._logdir.name
+        wandb.init(
+            project=wb.get("project", "dreamerv3-backbones"),
+            entity=wb.get("entity"),
+            name=wb.get("name") or default_name,
+            group=wb.get("group"),
+            tags=list(wb.get("tags") or []),
+            notes=wb.get("notes"),
+            dir=str(self._logdir),
+        )
 
     def scalar(self, name, value):
         self._scalars[name] = float(value)
@@ -174,27 +192,29 @@ class Logger:
         print(f"[{step}]", " / ".join(f"{k} {v:.1f}" for k, v in scalars))
         with (self._logdir / self._filename).open("a") as f:
             f.write(json.dumps({"step": step, **dict(scalars)}) + "\n")
+
+        payload = {}
         for name, value in scalars:
-            if "/" not in name:
-                self._writer.add_scalar("scalars/" + name, value, step)
-            else:
-                self._writer.add_scalar(name, value, step)
+            key = name if "/" in name else "scalars/" + name
+            payload[key] = value
         for name, value in self._images.items():
-            self._writer.add_image(name, value, step)
+            payload[name] = wandb.Image(value)
         for name, value in self._videos.items():
             name = name if isinstance(name, str) else name.decode("utf-8")
             if np.issubdtype(value.dtype, np.floating):
                 value = np.clip(255 * value, 0, 255).astype(np.uint8)
             B, T, H, W, C = value.shape
-            value = value.transpose(1, 4, 2, 0, 3).reshape((1, T, C, H, B * W))
-            self._writer.add_video(name, value, step, 16)
+            # Tile batch horizontally and convert to (T, C, H, B*W) for wandb.
+            value = value.transpose(1, 4, 2, 0, 3).reshape((T, C, H, B * W))
+            payload[name] = wandb.Video(value, fps=16, format="mp4")
         for name, value in self._histograms.items():
-            self._writer.add_histogram(name, value, step)
+            payload[name] = wandb.Histogram(value)
 
-        self._writer.flush()
+        wandb.log(payload, step=step)
         self._scalars = {}
         self._images = {}
         self._videos = {}
+        self._histograms = {}
 
     def _compute_fps(self, step):
         if self._last_step is None:
@@ -208,35 +228,18 @@ class Logger:
         return steps / duration
 
     def log_hydra_config(self, config, name="config", step=0, log_hparams=False, hparams_run_name="."):
+        """Push a flattened Hydra/OmegaConf config into wandb.config so it shows
+        up in the run's Config panel and is queryable across runs.
         """
-        Log a Hydra/OmegaConf config to TensorBoard:
-          - as YAML text under "{name}/yaml"
-          - as flattened hparams to the HParams plugin
-        """
-        # 1) Log YAML to Text plugin
-        yaml_str = None
+        from omegaconf import OmegaConf
+
         try:
-            from omegaconf import (
-                OmegaConf,  # local import to avoid hard dependency at module import
-            )
-
-            yaml_str = OmegaConf.to_yaml(config, resolve=True)
-        except ImportError:
-            # Fallback to string representation
-            yaml_str = str(config)
-        self._writer.add_text(f"{name}/yaml", f"```yaml\n{yaml_str}\n```", step)
-
-        # 2) Log flattened hparams to HParams plugin
-        flat = {}
-        container = None
-        try:
-            from omegaconf import OmegaConf  # local import again
-
             container = OmegaConf.to_container(config, resolve=True)
         except Exception:
             container = None
 
-        if log_hparams and container is not None:
+        flat = {}
+        if container is not None:
 
             def _flatten(prefix, obj):
                 if isinstance(obj, dict):
@@ -250,10 +253,7 @@ class Logger:
                     flat[prefix] = str(obj)
 
             _flatten("", container)
-            # add_hparams requires a non-empty metrics dict
-            with contextlib.suppress(TypeError):
-                # Avoid creating a timestamped subdirectory by specifying run_name (PyTorch >= 1.14)
-                self._writer.add_hparams(flat, {"_": 0}, run_name=hparams_run_name)
+            wandb.config.update(flat, allow_val_change=True)
 
 
 def convert(value, precision=32):

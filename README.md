@@ -19,9 +19,10 @@ Run training on default settings:
 python3 train.py logdir=./logdir/test
 ```
 
-Monitoring results:
+Monitoring results: training metrics are logged to [Weights & Biases](https://wandb.ai). Authenticate once with `wandb login` (or set `WANDB_API_KEY`) and runs will appear in the `dreamerv3-backbones` project by default. Override the wandb project/entity/run name from the CLI:
+
 ```bash
-tensorboard --logdir ./logdir
+python3 train.py wandb.project=my-project wandb.entity=my-team wandb.name=walker-walk-r2
 ```
 
 Switching algorithms:

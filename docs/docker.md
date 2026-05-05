@@ -35,12 +35,18 @@ python3 train.py env=dmc_vision env.task=dmc_walker_walk
 docker exec -it -d r2dreamer-container bash -c "python3 train.py env=dmc_vision env.task=dmc_walker_walk"
 ```
 
-To monitor training progress with TensorBoard, run the following command in a separate terminal on your host machine:
+Training metrics are logged to [Weights & Biases](https://wandb.ai). Pass your API key into the container so the run can stream metrics out:
 
 ```bash
-docker exec -it r2dreamer-container tensorboard --logdir ./logdir
+docker run -it -d --rm \
+    --gpus=all \
+    --network=host \
+    --volume=$PWD:/workspace \
+    --env WANDB_API_KEY=$WANDB_API_KEY \
+    --name=r2dreamer-container \
+    r2dreamer:local
 ```
 
-The TensorBoard dashboard will then be available at `http://localhost:6006/`.
+Runs then show up in the `dreamerv3-backbones` project on wandb (override via `wandb.project=...` on the CLI).
 
 > Docker documentation contributed by [@MeierTobias](https://github.com/MeierTobias).

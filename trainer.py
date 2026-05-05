@@ -133,7 +133,7 @@ class OnlineTrainer:
                             video_cache = []
                         self.logger.scalar("episode/score", returns[i])
                         self.logger.scalar("episode/length", lengths[i])
-                        self.logger.write(step + i)  # to show all values on tensorboard
+                        self.logger.write(step + i)  # flush per-env episode metrics
                         returns[i] = lengths[i] = 0
             step += int((~done).sum()) * self._action_repeat  # step is based on env side
             lengths += ~done

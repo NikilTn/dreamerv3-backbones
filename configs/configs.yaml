@@ -11,6 +11,14 @@ seed: 0
 deterministic_run: False
 device: 'cuda:0'
 
+wandb:
+  project: dreamerv3-backbones
+  entity: null
+  name: null
+  group: null
+  tags: []
+  notes: null
+
 hydra:
   run:
     dir: ${logdir}

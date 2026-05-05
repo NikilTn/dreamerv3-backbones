@@ -56,7 +56,7 @@ def main(config):
         ),
     )
 
-    logger = tools.Logger(logdir)
+    logger = tools.Logger(logdir, wandb_config=config.get("wandb"))
     # save config
     logger.log_hydra_config(config)
 
