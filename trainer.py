@@ -7,6 +7,7 @@ class OnlineTrainer:
     def __init__(self, config, replay_buffer, logger, logdir, train_envs, eval_envs):
         self.replay_buffer = replay_buffer
         self.logger = logger
+        self.logdir = logdir
         self.train_envs = train_envs
         self.eval_envs = eval_envs
         self.steps = int(config.steps)
@@ -16,6 +17,9 @@ class OnlineTrainer:
         self.video_pred_log = bool(config.video_pred_log)
         self.params_hist_log = bool(config.params_hist_log)
         self.batch_length = int(config.batch_length)
+        self.checkpoint_every = int(float(getattr(config, "checkpoint_every", 0)))
+        self.checkpoint_keep_all = bool(getattr(config, "checkpoint_keep_all", True))
+        self._next_checkpoint_step = self.checkpoint_every if self.checkpoint_every > 0 else None
         batch_steps = int(config.batch_size * config.batch_length)
         # train_ratio is based on data steps rather than environment steps.
         self._updates_needed = tools.Every(batch_steps / config.train_ratio * config.action_repeat)
@@ -23,6 +27,60 @@ class OnlineTrainer:
         self._should_log = tools.Every(config.update_log_every)
         self._should_eval = tools.Every(self.eval_every)
         self._action_repeat = config.action_repeat
+
+    def _align_checkpoint_schedule(self, step):
+        if self.checkpoint_every <= 0:
+            self._next_checkpoint_step = None
+            return
+        step = int(step)
+        self._next_checkpoint_step = ((step // self.checkpoint_every) + 1) * self.checkpoint_every
+
+    def save_checkpoint(self, agent, step, *, final=False):
+        """Write a checkpoint atomically enough for shared filesystems.
+
+        ``latest.pt`` is always refreshed. When ``checkpoint_keep_all`` is set,
+        periodic checkpoints also get a stable step-specific filename so a
+        suspended or killed run still leaves behind evaluable model snapshots.
+        """
+        items_to_save = {
+            "agent_state_dict": agent.state_dict(),
+            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+            "trainer_step": int(step),
+            "final": bool(final),
+            "replay_buffer_included": False,
+        }
+
+        def write_atomic(path):
+            tmp = path.with_name(f".{path.name}.tmp")
+            torch.save(items_to_save, tmp)
+            tmp.replace(path)
+
+        latest_path = self.logdir / "latest.pt"
+        write_atomic(latest_path)
+        checkpoint_path = latest_path
+        if self.checkpoint_keep_all and not final:
+            checkpoint_path = self.logdir / f"checkpoint_{int(step):09d}.pt"
+            write_atomic(checkpoint_path)
+        tools.update_run_metadata(
+            self.logdir,
+            latest_checkpoint_step=int(step),
+            latest_checkpoint_path=str(latest_path),
+            latest_numbered_checkpoint_path=str(checkpoint_path) if checkpoint_path != latest_path else None,
+        )
+        print(
+            f"Saved {'final ' if final else ''}checkpoint at step {int(step)} "
+            f"to {latest_path}",
+            flush=True,
+        )
+
+    def _maybe_checkpoint(self, agent, step):
+        if self._next_checkpoint_step is None:
+            return
+        if step < self._next_checkpoint_step:
+            return
+        self.save_checkpoint(agent, step)
+        while self._next_checkpoint_step is not None and step >= self._next_checkpoint_step:
+            self._next_checkpoint_step += self.checkpoint_every
 
     def eval(self, agent, train_step):
         """Run evaluation episodes.
@@ -97,7 +155,7 @@ class OnlineTrainer:
         self.logger.write(train_step)
         agent.train()
 
-    def begin(self, agent):
+    def begin(self, agent, initial_step=None):
         """Main online training loop.
 
         The loop is designed to overlap CPU environment stepping and GPU model
@@ -106,7 +164,11 @@ class OnlineTrainer:
         """
         envs = self.train_envs
         video_cache = []
-        step = self.replay_buffer.count() * self._action_repeat
+        if initial_step is None:
+            step = self.replay_buffer.count() * self._action_repeat
+        else:
+            step = int(initial_step)
+        self._align_checkpoint_schedule(step)
         update_count = 0
         # (B,)
         done = torch.ones(envs.env_num, dtype=torch.bool, device=agent.device)
@@ -168,7 +230,8 @@ class OnlineTrainer:
             self.replay_buffer.add_transition(trans.detach())
             returns += trans["reward"][:, 0]
             # Update models after enough data has accumulated
-            if step // (envs.env_num * self._action_repeat) > self.batch_length + 1:
+            replay_steps_per_env = self.replay_buffer.count() // envs.env_num
+            if replay_steps_per_env > self.batch_length + 1:
                 if self._should_pretrain():
                     update_num = self.pretrain
                 else:
@@ -190,3 +253,4 @@ class OnlineTrainer:
                         for name, param in agent._named_params.items():
                             self.logger.histogram(name, tools.to_np(param))
                     self.logger.write(step, fps=True)
+            self._maybe_checkpoint(agent, step)

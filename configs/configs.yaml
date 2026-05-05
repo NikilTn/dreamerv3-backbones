@@ -10,6 +10,12 @@ logdir: logdir/${now:%Y-%m-%d}/${now:%H-%M-%S}
 seed: 0
 deterministic_run: False
 device: 'cuda:0'
+# Optional practical resume path. This restores model + optimizer state and
+# continues the global trainer step from the checkpoint's trainer_step. Replay
+# buffer / env worker state are not restored.
+resume_checkpoint: null
+resume_load_optim: True
+resume_strict: True
 
 hydra:
   run:
@@ -37,6 +43,7 @@ buffer:
 trainer:
   steps: ${env.steps}
   pretrain: 0
+  burn_in: 0
   eval_every: 1e4
   eval_episode_num: ${env.eval_episode_num}
   batch_size: ${batch_size}
@@ -45,4 +52,8 @@ trainer:
   video_pred_log: False
   params_hist_log: False
   update_log_every: 5e3
+  # Save latest.pt plus numbered checkpoints every N trainer steps. Set to 0
+  # to disable periodic checkpoints while keeping the final latest.pt save.
+  checkpoint_every: 1e5
+  checkpoint_keep_all: True
   action_repeat: ${env.action_repeat}

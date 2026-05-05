@@ -1,5 +1,7 @@
 # Logs / artifacts
 logdir/
+checkpoints/
+slurm/
 *.hydra/
 torch_compile_debug/
 
@@ -130,3 +132,4 @@ dmypy.json
 # IDE
 .vscode
 .clinerules
+.claude/

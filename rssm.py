@@ -31,8 +31,16 @@ class Deter(nn.Module):
         self.flat2group = lambda x: x.reshape(*x.shape[:-1], self.blocks, -1)
         self.group2flat = lambda x: x.reshape(*x.shape[:-2], -1)
 
-    def forward(self, stoch, deter, action):
-        """Deterministic state transition (block-GRU style)."""
+    def initial_extra(self, batch_size, device):
+        """GRU has no extra recurrent state beyond ``deter`` itself."""
+        return {}
+
+    def forward(self, stoch, deter, action, extra=None):
+        """Deterministic state transition (block-GRU style).
+
+        Returns ``(next_deter, extra)`` where ``extra`` is unchanged. The empty
+        ``extra`` keeps the interface uniform across backbones.
+        """
         # (B, S, K), (B, D), (B, A)
         B = action.shape[0]
 
@@ -70,7 +78,8 @@ class Deter(nn.Module):
         cand = torch.tanh(reset * cand)
         update = torch.sigmoid(update - 1)
         # (B, D)
-        return update * cand + (1 - update) * deter
+        next_deter = update * cand + (1 - update) * deter
+        return next_deter, extra if extra is not None else {}
 
 
 class RSSM(CategoricalRSSM):

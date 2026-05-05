@@ -31,6 +31,11 @@ class Dreamer(nn.Module):
         self.rep_loss = str(config.rep_loss)
         self._amp_enabled = self.device.type == "cuda"
         self.cpc_enabled = bool(config.cpc.enabled)
+        # Replay-chunk burn-in: number of leading time steps whose world-model
+        # losses are masked out so the backbone's persistent extra-state has a
+        # chance to warm up from the chunk's zero-initialized seed before its
+        # predictions are graded. See `docs/backbone_work_plan.md` Phase 1.5.
+        self.burn_in = int(getattr(config, "burn_in", 0))
 
         # World model components
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
@@ -51,8 +56,16 @@ class Dreamer(nn.Module):
         else:
             config.actor.dist = config.actor.dist.cont
 
-        # Actor-critic components
-        self.actor = networks.MLPHead(config.actor, self.rssm.feat_size)
+        # Actor-critic components.
+        # The actor uses ``policy_feat`` (proposal §3.1: SSSM backbones use
+        # the hidden-state policy ``π(a | z_t, x_t)`` instead of the default
+        # output-state policy ``π(a | z_t, h_t)``). For GRU/transformer
+        # backbones, ``policy_feat_size == feat_size`` and behavior is
+        # unchanged; for SSSM backbones (Mamba/S4/S5), the actor sees a
+        # different input width.
+        self.actor = networks.MLPHead(config.actor, self.rssm.policy_feat_size)
+        # Critic stays on the world-model feat (z, h) — only the policy
+        # input changes per the proposal.
         self.value = networks.MLPHead(config.critic, self.rssm.feat_size)
         self.slow_target_update = int(config.slow_target_update)
         self.slow_target_fraction = float(config.slow_target_fraction)
@@ -189,7 +202,15 @@ class Dreamer(nn.Module):
 
         self.train()
         self.clone_and_freeze()
-        self._compile_enabled = bool(config.compile) and self.device.type == "cuda"
+        compile_requested = bool(config.compile) and self.device.type == "cuda"
+        backbone = str(getattr(config, "backbone", "")).lower()
+        if compile_requested and backbone == "s5":
+            # TorchInductor currently does not compile S5's native complex64
+            # recurrence reliably. Keep S5 eager while allowing the other
+            # backbones to use compile's large steady-state speedup.
+            print("torch.compile disabled for S5 complex-state backbone; using eager mode.")
+            compile_requested = False
+        self._compile_enabled = compile_requested
         if self._compile_enabled:
             print("Compiling update function with torch.compile...")
             self._cal_grad = torch.compile(self._cal_grad, mode="reduce-overhead")
@@ -280,7 +301,13 @@ class Dreamer(nn.Module):
 
     @torch.no_grad()
     def act(self, obs, state, eval=False):
-        """Policy inference step."""
+        """Policy inference step.
+
+        ``state`` carries ``stoch``, ``deter``, ``prev_action`` (always) plus an
+        optional nested ``extra`` TensorDict holding per-env recurrent state for
+        backbones that need it (S4/S5 SSM hidden state, Mamba conv state,
+        Transformer KV/token cache). For GRU ``extra`` is empty.
+        """
         # obs: dict of (B, *), state: (stoch: (B, S, K), deter: (B, D), prev_action: (B, A))
         self._mark_step_begin()
         p_obs = self.preprocess(obs)
@@ -291,23 +318,52 @@ class Dreamer(nn.Module):
             state["deter"],
             state["prev_action"],
         )
+        prev_extra = self._unpack_extra(state, prev_stoch.shape[0])
         # (B, S, K), (B, D)
-        stoch, deter, _ = self._frozen_rssm.obs_step(prev_stoch, prev_deter, prev_action, embed, obs["is_first"])
-        # (B, F)
-        feat = self._frozen_rssm.get_feat(stoch, deter)
-        action_dist = self._frozen_actor(feat)
+        stoch, deter, _, extra = self._frozen_rssm.obs_step(
+            prev_stoch, prev_deter, prev_action, embed, obs["is_first"], extra=prev_extra
+        )
+        # (B, F_policy) — SSSM hidden-state policy uses extra["x_t"], others
+        # default to cat([stoch, deter]).
+        policy_feat = self._frozen_rssm.policy_feat(stoch, deter, extra)
+        action_dist = self._frozen_actor(policy_feat)
         # (B, A)
         action = action_dist.mode if eval else action_dist.rsample()
-        return action, TensorDict(
-            {"stoch": stoch, "deter": deter, "prev_action": action},
-            batch_size=state.batch_size,
-        )
+        new_state = {"stoch": stoch, "deter": deter, "prev_action": action}
+        new_state.update(self._pack_extra(extra, prev_stoch.shape[0]))
+        return action, TensorDict(new_state, batch_size=state.batch_size)
 
     @torch.no_grad()
     def get_initial_state(self, B):
-        stoch, deter = self.rssm.initial(B)
+        stoch, deter, extra = self.rssm.initial(B)
         action = torch.zeros(B, self.act_dim, dtype=torch.float32, device=self.device)
-        return TensorDict({"stoch": stoch, "deter": deter, "prev_action": action}, batch_size=(B,))
+        td = {"stoch": stoch, "deter": deter, "prev_action": action}
+        td.update(self._pack_extra(extra, B))
+        return TensorDict(td, batch_size=(B,))
+
+    def _pack_extra(self, extra, batch_size):
+        """Wrap an extra-state dict for storage in the agent_state TensorDict.
+
+        Returns a dict mapping the single key ``"extra"`` to a nested
+        TensorDict, or an empty dict if there is no extra state to carry.
+        Empty dicts skip the ``"extra"`` key entirely so GRU's agent_state
+        stays unchanged.
+        """
+        if not extra:
+            return {}
+        return {"extra": TensorDict(dict(extra), batch_size=(batch_size,))}
+
+    def _unpack_extra(self, state, batch_size):
+        """Pull the per-env extra-state dict out of the agent_state TensorDict.
+
+        Falls back to the backbone's zero-initialized state if absent (e.g. for
+        the very first step before any extra has been written, or for GRU which
+        never stores anything).
+        """
+        if "extra" in state.keys():
+            extra_td = state["extra"]
+            return {key: extra_td[key] for key in extra_td.keys()}
+        return self._frozen_rssm._initial_extra(batch_size)
 
     @torch.no_grad()
     def video_pred(self, data, initial):
@@ -408,20 +464,35 @@ class Dreamer(nn.Module):
         # === World model: posterior rollout and KL losses ===
         # (B, T, E)
         embed = self.encoder(data)
-        # (B, T, S, K), (B, T, D), (B, T, S, K)
-        post_stoch, post_deter, post_logit = self.rssm.observe(embed, data["action"], initial, data["is_first"])
+        # Burn-in mask: zero out the first `burn_in` time steps so the
+        # backbone's persistent extra-state can warm up before its predictions
+        # are graded. `min(burn_in, T-1)` keeps at least one step contributing.
+        eff_burn = min(int(self.burn_in), max(int(T) - 1, 0))
+        time_mask = data["action"].new_ones(B, T)
+        if eff_burn > 0:
+            time_mask[:, :eff_burn] = 0.0
+        mask_norm = time_mask.sum().clamp(min=1.0)
+        # (B, T, S, K), (B, T, D), (B, T, S, K), per-step extras
+        post_stoch, post_deter, post_logit, post_extras = self.rssm.observe(
+            embed, data["action"], initial, data["is_first"], return_extra=True
+        )
         # (B, T, S, K)
         _, prior_logit = self.rssm.prior(post_deter)
         dyn_loss, rep_loss = self.rssm.kl_loss(post_logit, prior_logit, self.kl_free)
-        losses["dyn"] = torch.mean(dyn_loss)
-        losses["rep"] = torch.mean(rep_loss)
+        losses["dyn"] = (dyn_loss * time_mask).sum() / mask_norm
+        losses["rep"] = (rep_loss * time_mask).sum() / mask_norm
         # === Representation / auxiliary losses ===
         # (B, T, F)
         feat = self.rssm.get_feat(post_stoch, post_deter)
         if self.rep_loss == "dreamer":
-            recon_losses = {
-                key: torch.mean(-dist.log_prob(data[key])) for key, dist in self.decoder(post_stoch, post_deter).items()
-            }
+            recon_losses = {}
+            for key, dist in self.decoder(post_stoch, post_deter).items():
+                # log_prob over the data; mask burn-in time steps before averaging.
+                lp = dist.log_prob(data[key])
+                # `lp` may have a trailing feature dim; broadcast time_mask over it.
+                while lp.dim() > time_mask.dim():
+                    lp = lp.sum(dim=-1)
+                recon_losses[key] = (-lp * time_mask).sum() / mask_norm
             losses.update(recon_losses)
         elif self.rep_loss == "r2dreamer":
             # R2-Dreamer: Barlow Twins style redundancy reduction between latent features and encoder embeddings.
@@ -469,12 +540,19 @@ class Dreamer(nn.Module):
         else:
             raise NotImplementedError
         if self.cpc_enabled:
-            losses["cpc"] = self.cpc_loss(data, feat, post_stoch, post_deter)
+            losses["cpc"] = self.cpc_loss(data, feat, post_stoch, post_deter, post_extras)
 
         # reward and continue
-        losses["rew"] = torch.mean(-self.reward(feat).log_prob(to_f32(data["reward"])))
+        rew_lp = self.reward(feat).log_prob(to_f32(data["reward"]))
         cont = 1.0 - to_f32(data["is_terminal"])
-        losses["con"] = torch.mean(-self.cont(feat).log_prob(cont))
+        cont_lp = self.cont(feat).log_prob(cont)
+        # Apply burn-in mask consistently with the world-model losses above.
+        while rew_lp.dim() > time_mask.dim():
+            rew_lp = rew_lp.sum(dim=-1)
+        while cont_lp.dim() > time_mask.dim():
+            cont_lp = cont_lp.sum(dim=-1)
+        losses["rew"] = (-rew_lp * time_mask).sum() / mask_norm
+        losses["con"] = (-cont_lp * time_mask).sum() / mask_norm
         # log
         metrics["dyn_entropy"] = torch.mean(self.rssm.get_dist(prior_logit).entropy())
         metrics["rep_entropy"] = torch.mean(self.rssm.get_dist(post_logit).entropy())
@@ -486,13 +564,27 @@ class Dreamer(nn.Module):
                 post_stoch.reshape(-1, *post_stoch.shape[2:]).detach(),
                 post_deter.reshape(-1, *post_deter.shape[2:]).detach(),
             )
+            # Per-time-step posterior extras: (B, T, ...) -> (B*T, ...). Each
+            # imagination starting point inherits the matching SSM/cache state
+            # from its source time step instead of starting from zeros.
+            initial_extra = {
+                key: val.reshape(-1, *val.shape[2:]).detach()
+                for key, val in post_extras.items()
+            }
         else:
             start = (policy_start[0].detach(), policy_start[1].detach())
+            # `policy_start` comes from DFS sampling and only carries (stoch, deter)
+            # for now; imagination starts from a fresh extra-state in that path.
+            initial_extra = None
         # (B, T, ...) -> (B*T, ...)
-        imag_feat, imag_action = self._imagine(start, self.imag_horizon + 1)
-        imag_feat, imag_action = imag_feat.detach(), imag_action.detach()
+        imag_feat, imag_policy_feat, imag_action = self._imagine(
+            start, self.imag_horizon + 1, initial_extra=initial_extra
+        )
+        imag_feat = imag_feat.detach()
+        imag_policy_feat = imag_policy_feat.detach()
+        imag_action = imag_action.detach()
 
-        # (B*T, T_imag, 1)
+        # (B*T, T_imag, 1) — reward/cont/value all use the world-model feat.
         imag_reward = self._frozen_reward(imag_feat).mode()
         # (B*T, T_imag, 1)  probability of continuation
         imag_cont = self._frozen_cont(imag_feat).mean
@@ -511,7 +603,8 @@ class Dreamer(nn.Module):
         # (B*T, T_imag-1, 1)
         adv = (ret - imag_value[:, :-1]) / ret_scale
 
-        policy = self.actor(imag_feat)
+        # Actor sees policy feat (cat([z, x_t]) for SSSM, cat([z, h]) otherwise).
+        policy = self.actor(imag_policy_feat)
         # (B*T, T_imag-1, 1)
         logpi = policy.log_prob(imag_action)[:, :-1].unsqueeze(-1)
         entropy = policy.entropy()[:, :-1].unsqueeze(-1)
@@ -578,25 +671,49 @@ class Dreamer(nn.Module):
         return (post_stoch, post_deter), metrics
 
     @torch.no_grad()
-    def _imagine(self, start, imag_horizon):
-        """Roll out the policy in latent space."""
+    def _imagine(self, start, imag_horizon, initial_extra=None):
+        """Roll out the policy in latent space.
+
+        ``initial_extra`` is the per-env recurrent state to seed the rollout
+        with (matching SSM hidden state / transformer cache for the
+        corresponding posterior time step). When omitted, the rollout starts
+        from a fresh zero extra-state — appropriate for "what-if from a
+        checkpoint" calls where no real prior context is available.
+
+        Returns ``(world_feats, policy_feats, actions)`` of shapes
+        ``(B, T, feat_size)``, ``(B, T, policy_feat_size)``, ``(B, T, act_dim)``.
+        For GRU/transformer, ``policy_feats == world_feats`` (they share dim);
+        for SSSM backbones the actor sees ``policy_feats = cat([z, x_t])``.
+        """
         # (B, S, K), (B, D)
-        feats = []
+        world_feats = []
+        policy_feats = []
         actions = []
         stoch, deter = start
+        if initial_extra is None:
+            extra = self._frozen_rssm._initial_extra(stoch.shape[0])
+        else:
+            extra = initial_extra
+        step_context = self._frozen_rssm._prepare_step_context()
         for _ in range(imag_horizon):
-            # (B, F)
-            feat = self._frozen_rssm.get_feat(stoch, deter)
-            # (B, A)
-            action = self._frozen_actor(feat).rsample()
-            # Append feat and its corresponding sampled action at the same time step.
-            feats.append(feat)
+            # World-model feat (used by reward/cont/value heads).
+            world_feat = self._frozen_rssm.get_feat(stoch, deter)
+            # Policy feat (used by actor — equals world_feat for non-SSSM).
+            policy_feat = self._frozen_rssm.policy_feat(stoch, deter, extra)
+            action = self._frozen_actor(policy_feat).rsample()
+            world_feats.append(world_feat)
+            policy_feats.append(policy_feat)
             actions.append(action)
-            stoch, deter = self._frozen_rssm.img_step(stoch, deter, action)
+            stoch, deter, extra = self._frozen_rssm.img_step(
+                stoch, deter, action, extra=extra, step_context=step_context
+            )
 
         # Stack along sequence dim T_imag.
-        # (B, T_imag, F), (B, T_imag, A)
-        return torch.stack(feats, dim=1), torch.stack(actions, dim=1)
+        return (
+            torch.stack(world_feats, dim=1),
+            torch.stack(policy_feats, dim=1),
+            torch.stack(actions, dim=1),
+        )
 
     @torch.no_grad()
     def _lambda_return(self, last, term, reward, value, boot, disc, lamb):
@@ -613,8 +730,14 @@ class Dreamer(nn.Module):
             out.append(interm[:, i] + live[:, i] * cont[:, i] * out[-1])
         return torch.stack(list(reversed(out))[:-1], 1)
 
-    def cpc_loss(self, data, feat, post_stoch, post_deter):
-        """Action-conditioned CPC over real latent states and augmented encodings."""
+    def cpc_loss(self, data, feat, post_stoch, post_deter, post_extras=None):
+        """Action-conditioned CPC over real latent states and augmented encodings.
+
+        ``post_extras`` (per-time-step recurrent state from the posterior
+        observe pass) is sliced and flattened so each ``k``-step rollout
+        starts with the matching extra-state. When ``None``, rollouts start
+        from a fresh zero extra-state (legacy behavior).
+        """
         aug_data = self.augment_cpc_data(data)
         target_embed = self.encoder(aug_data)
         B, T = target_embed.shape[:2]
@@ -626,7 +749,16 @@ class Dreamer(nn.Module):
                 pred_feat = feat
                 target = target_embed
             else:
-                pred_feat = self.rollout_actions(post_stoch[:, : T - k], post_deter[:, : T - k], data["action"], k)
+                roll_extra = None
+                if post_extras:
+                    roll_extra = {
+                        key: val[:, : T - k].reshape(-1, *val.shape[2:])
+                        for key, val in post_extras.items()
+                    }
+                pred_feat = self.rollout_actions(
+                    post_stoch[:, : T - k], post_deter[:, : T - k], data["action"], k,
+                    initial_extra=roll_extra,
+                )
                 target = target_embed[:, k:]
 
             pred = self.cpc_pred_heads[k](pred_feat.reshape(-1, pred_feat.shape[-1]))
@@ -639,14 +771,27 @@ class Dreamer(nn.Module):
 
         return torch.stack(losses).mean()
 
-    def rollout_actions(self, stoch, deter, actions, horizon):
-        """Roll out the world model for `horizon` real actions from every valid start state."""
+    def rollout_actions(self, stoch, deter, actions, horizon, initial_extra=None):
+        """Roll out the world model for `horizon` real actions from every valid start state.
+
+        ``initial_extra`` (per-time-step posterior extras flattened to
+        ``(B*valid_steps, ...)``) seeds the imagined rollout with the matching
+        recurrent state. Defaults to a fresh zero extra-state for callers that
+        don't provide it (e.g. callers outside ``_cal_grad``).
+        """
         B, valid_steps = stoch.shape[:2]
         stoch = stoch.reshape(-1, *stoch.shape[2:])
         deter = deter.reshape(-1, deter.shape[-1])
+        if initial_extra is None:
+            extra = self.rssm._initial_extra(stoch.shape[0])
+        else:
+            extra = initial_extra
+        step_context = self.rssm._prepare_step_context()
         for step in range(horizon):
             action = actions[:, step : step + valid_steps].reshape(-1, actions.shape[-1])
-            stoch, deter = self.rssm.img_step(stoch, deter, action)
+            stoch, deter, extra = self.rssm.img_step(
+                stoch, deter, action, extra=extra, step_context=step_context
+            )
         feat = self.rssm.get_feat(stoch, deter)
         return feat.reshape(B, valid_steps, -1)
 

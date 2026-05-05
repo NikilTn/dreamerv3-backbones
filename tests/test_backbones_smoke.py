@@ -280,6 +280,39 @@ class BackboneSmokeTest(unittest.TestCase):
         metrics = agent.update(replay)
         self.assertIn("loss/cpc", metrics)
 
+    def test_burn_in_changes_world_model_loss(self):
+        """A non-zero ``burn_in`` mask should change the world-model loss
+        (dyn/rep/rew/con) for a fixed seed and batch, without crashing."""
+        obs_space, act_space = make_spaces()
+        torch.manual_seed(0)
+        cfg_no_burn = make_test_config("gru")
+        cfg_no_burn.burn_in = 0
+        agent = Dreamer(cfg_no_burn, obs_space, act_space).to("cpu")
+        initial = agent.rssm.initial(2)
+        batch = make_batch(2, 4, 3)
+        replay = FakeReplayBuffer(batch.clone(), initial)
+        metrics_no_burn = agent.update(replay)
+
+        torch.manual_seed(0)
+        cfg_burn = make_test_config("gru")
+        cfg_burn.burn_in = 2
+        agent2 = Dreamer(cfg_burn, obs_space, act_space).to("cpu")
+        initial2 = agent2.rssm.initial(2)
+        replay2 = FakeReplayBuffer(batch.clone(), initial2)
+        metrics_burn = agent2.update(replay2)
+
+        # Different burn_in values should produce different per-step losses
+        # on the same data (otherwise the mask had no effect). We use cont
+        # rather than dyn (which hits the kl_free clamp for a fresh model and
+        # is constant in time) and rather than rew (whose head has
+        # outscale=0 in the default config, so predictions are also flat).
+        self.assertNotAlmostEqual(
+            float(metrics_no_burn["loss/con"].detach()),
+            float(metrics_burn["loss/con"].detach()),
+            places=5,
+            msg="burn_in mask did not change the cont loss; mask is not being applied",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

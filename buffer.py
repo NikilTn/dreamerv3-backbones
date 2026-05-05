@@ -1,4 +1,5 @@
 import torch
+from tensordict import TensorDict
 from torchrl.data.replay_buffers import LazyTensorStorage, ReplayBuffer
 from torchrl.data.replay_buffers.samplers import PrioritizedSliceSampler, SliceSampler
 
@@ -169,8 +170,13 @@ class Buffer:
         # (B, T, D) -> (B*T, D)
         deter = deter.reshape(-1, *deter.shape[2:])
         # In storage, the length is the first dimension, and the batch (number of environments) is the second dimension.
-        self._buffer[index[1], index[0]].set_("stoch", stoch)
-        self._buffer[index[1], index[0]].set_("deter", deter)
+        stoch = stoch.to(self.storage_device, non_blocking=True)
+        deter = deter.to(self.storage_device, non_blocking=True)
+        self._buffer.storage.set(
+            (index[0], index[1]),
+            TensorDict({"stoch": stoch, "deter": deter}, batch_size=(stoch.shape[0],), device=self.storage_device),
+            set_cursor=False,
+        )
 
     def count(self):
         if self._buffer.storage.shape is None:

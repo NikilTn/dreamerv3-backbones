@@ -64,6 +64,20 @@ class BufferDFSSmokeTest(unittest.TestCase):
         self.assertEqual(tuple(starts[1].shape), (6, 8))
         self.assertIn("buffer/policy_start_count_mean", start_metrics)
 
+    def test_latent_update_writes_sampled_storage_coordinates(self):
+        buffer = Buffer(make_buffer_config())
+        for step in range(8):
+            buffer.add_transition(make_transition(step))
+
+        data, index, initial, metrics = buffer.sample()
+        new_stoch = torch.full((2, 3, 4, 4), 123.0)
+        new_deter = torch.full((2, 3, 8), 456.0)
+        buffer.update(index, new_stoch, new_deter)
+
+        sampled = buffer._buffer.storage[index[0].reshape(-1), index[1].reshape(-1)]
+        self.assertTrue(torch.all(sampled["stoch"] == 123.0))
+        self.assertTrue(torch.all(sampled["deter"] == 456.0))
+
 
 if __name__ == "__main__":
     unittest.main()

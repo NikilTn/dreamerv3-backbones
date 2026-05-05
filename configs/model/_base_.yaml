@@ -84,12 +84,24 @@ transformer:
   layers: 2
   heads: 4
   ff_mult: 4
+  # Phase 2a (Transformer-XL): per-layer attention context length.
+  # Defaults to `tokens` so a bare config preserves the historical short-memory
+  # behavior. Bump (e.g. 128) for paper-faithful long-memory transformer runs.
+  cache_length: 8
 
 mamba:
   tokens: 8
   layers: 2
   expand: 2
   conv_kernel: 3
+  # Phase 2b (Mamba-2 SSD selective scan, Dao & Gu ICML 2024 — proposal §3.2
+  # cited as reference [5]). The SSM is multi-head: each of `nheads` heads
+  # has a single scalar A and operates on `headdim = (expand * deter / tokens)
+  # / nheads` channels. State shape per layer is
+  # `(B, nheads, headdim, state_size)`.
+  # Constraint: `expand * deter / tokens` must be divisible by `nheads`.
+  state_size: 64   # paper-typical d_state for Mamba-2 (official default 128)
+  nheads: 8        # Mamba-2 default head count
 
 s4:
   tokens: 8

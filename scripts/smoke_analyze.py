@@ -74,7 +74,7 @@ def require(sps: dict, key: str) -> float:
         sys.exit(
             f"ERROR: smoke run '{key}' missing or has no usable fps samples.\n"
             f"  Check logdir/smoke/{key}/console.log and metrics.jsonl.\n"
-            f"  All 10 smoke jobs must complete before running the analyzer."
+            f"  All 12 smoke jobs must complete before running the analyzer."
         )
     return v
 
@@ -90,7 +90,7 @@ def project(
 
     bb_overhead = {
         bb: base_popgym / require(sps, f"popgym_{bb}_none")
-        for bb in ("gru", "transformer", "mamba", "s4", "s5")
+        for bb in ("gru", "transformer", "mamba2", "s3m", "s5")
     }
     sub_overhead = {
         "none":    1.0,
@@ -111,6 +111,10 @@ def project(
     print("\n=== Subexp overhead (multiplicative) ===")
     for s, x in sub_overhead.items():
         print(f"  {s:8s} {x:.2f}x")
+    if sps.get("popgym_mamba2_cpc") is not None:
+        print(f"  {'mamba2_cpc':12s} {base_popgym / require(sps, 'popgym_mamba2_cpc'):.2f}x vs GRU none")
+    if sps.get("popgym_mamba2_dfs") is not None:
+        print(f"  {'mamba2_dfs':12s} {base_popgym / require(sps, 'popgym_mamba2_dfs'):.2f}x vs GRU none")
 
     print("\n=== Per-env-family GRU baseline fps ===")
     for e, x in base.items():
@@ -166,8 +170,8 @@ DEFAULT_SWEEP: list[tuple[str, str, str, int]] = [
     # Main 75-run plan: POPGym RepeatPrevious x 5 backbones x 5 seeds x 3 difficulties.
     ("gru",         "popgym", "none", 15),
     ("transformer", "popgym", "none", 15),
-    ("mamba",       "popgym", "none", 15),
-    ("s4",          "popgym", "none", 15),
+    ("mamba2",      "popgym", "none", 15),
+    ("s3m",         "popgym", "none", 15),
     ("s5",          "popgym", "none", 15),
 ]
 
@@ -177,43 +181,43 @@ EXPANDED_SWEEP: list[tuple[str, str, str, int]] = [
     # POPGym RepeatPrevious x all backbones x 3 difficulties x 5 seeds = 75
     ("gru",         "popgym", "none", 15),
     ("transformer", "popgym", "none", 15),
-    ("mamba",       "popgym", "none", 15),
-    ("s4",          "popgym", "none", 15),
+    ("mamba2",      "popgym", "none", 15),
+    ("s3m",         "popgym", "none", 15),
     ("s5",          "popgym", "none", 15),
     # POPGym Autoencode x all backbones x 3 difficulties x 3 seeds = 45
     ("gru",         "popgym", "none", 9),
     ("transformer", "popgym", "none", 9),
-    ("mamba",       "popgym", "none", 9),
-    ("s4",          "popgym", "none", 9),
+    ("mamba2",      "popgym", "none", 9),
+    ("s3m",         "popgym", "none", 9),
     ("s5",          "popgym", "none", 9),
     # BSuite memory_len + memory_size x all backbones x 3 ids each x 3 seeds = 90
     ("gru",         "bsuite", "none", 18),
     ("transformer", "bsuite", "none", 18),
-    ("mamba",       "bsuite", "none", 18),
-    ("s4",          "bsuite", "none", 18),
+    ("mamba2",      "bsuite", "none", 18),
+    ("s3m",         "bsuite", "none", 18),
     ("s5",          "bsuite", "none", 18),
     # Atari100k subset (8 games) x all backbones x 3 seeds = 120
     ("gru",         "atari100k", "none", 24),
     ("transformer", "atari100k", "none", 24),
-    ("mamba",       "atari100k", "none", 24),
-    ("s4",          "atari100k", "none", 24),
+    ("mamba2",      "atari100k", "none", 24),
+    ("s3m",         "atari100k", "none", 24),
     ("s5",          "atari100k", "none", 24),
     # Sub-experiments on POPGym Hard only x all backbones x 3 envs x 3 seeds.
     # (3 subexps cells: cpc, dfs, cpc_dfs, since `none` is already counted above.)
     ("gru",         "popgym", "cpc",     9),
     ("transformer", "popgym", "cpc",     9),
-    ("mamba",       "popgym", "cpc",     9),
-    ("s4",          "popgym", "cpc",     9),
+    ("mamba2",      "popgym", "cpc",     9),
+    ("s3m",         "popgym", "cpc",     9),
     ("s5",          "popgym", "cpc",     9),
     ("gru",         "popgym", "dfs",     9),
     ("transformer", "popgym", "dfs",     9),
-    ("mamba",       "popgym", "dfs",     9),
-    ("s4",          "popgym", "dfs",     9),
+    ("mamba2",      "popgym", "dfs",     9),
+    ("s3m",         "popgym", "dfs",     9),
     ("s5",          "popgym", "dfs",     9),
     ("gru",         "popgym", "cpc_dfs", 9),
     ("transformer", "popgym", "cpc_dfs", 9),
-    ("mamba",       "popgym", "cpc_dfs", 9),
-    ("s4",          "popgym", "cpc_dfs", 9),
+    ("mamba2",      "popgym", "cpc_dfs", 9),
+    ("s3m",         "popgym", "cpc_dfs", 9),
     ("s5",          "popgym", "cpc_dfs", 9),
 ]
 

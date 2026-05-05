@@ -8,6 +8,8 @@ class POPGym(gym.Env):
     metadata = {}
 
     def __init__(self, task, seed=None):
+        if not str(task).startswith("popgym-"):
+            task = f"popgym-{task}"
         self._env = gym.make(task)
         self._seed = seed
         self._did_seed = False
