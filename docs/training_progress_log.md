@@ -680,3 +680,68 @@ Download note:
   `latest.pt`, config, metadata, metrics, and console logs only. A few local
   numbered checkpoint files may remain from the interrupted broad sync, but the
   manifest indexes only completed final `latest.pt` checkpoints.
+
+### 2026-05-06 02:14 PDT Easy/S3M Seed4 Rerun
+
+Submitted the only failed run as a single H100 job:
+
+- Slurm job: `39448`
+- Partition/GPU request: `gpuqs`, `gpu:h100:1`
+- Job name: `rerun_easy_s3m4`
+- Target run:
+  `RepeatPreviousEasy-v0 / s3m / seed4`
+- Safer overrides:
+  - `batch_size=256`
+  - `batch_length=128`
+  - `env.env_num=4`
+  - `trainer.burn_in=8`
+  - `model.compile=False`
+  - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+- Logdir:
+
+```text
+logdir/repeat_previous_reduced_20260504_004958_reruns/popgym_repeat_previous/none/popgym_RepeatPreviousEasy-v0/s3m/seed4_bs256
+```
+
+Pre-submit checks:
+
+- Rerun logdir did not already exist.
+- Remote Python syntax check passed for key training files.
+- Slurm `--test-only` predicted an H100 start on `g19` in `gpuqs`.
+
+Status immediately after submit:
+
+- `PENDING`, reason `Priority`.
+- No GPU time used yet.
+
+### 2026-05-06 Analysis Artifacts
+
+Downloaded final artifacts locally for the 44 completed runs:
+
+- `latest.pt`: 44.
+- `run_metadata.json`: 45.
+- `metrics.jsonl`: 45.
+- `console.log`: 45.
+- `resolved_config.json`: 45.
+- Completed-run manifest rows: 44.
+
+Generated completed-only analysis outputs at:
+
+```text
+checkpoints/repeat_previous_reduced_20260504_004958/analysis_completed_only
+```
+
+Files:
+
+- `summary.md`
+- `runs.csv`
+- `per_task_summary.csv`
+- `suite_summary.csv`
+- `learning_curves.csv`
+- `performance_profiles.csv`
+- `pairwise_probability_of_improvement.csv`
+
+Use `analysis_completed_only`, not `analysis_44_completed`, for paper/PPT
+tables. The first analysis folder included the failed partial Easy/S3M seed4
+metrics because the run still had `metrics.jsonl`; the completed-only folder
+filters to runs whose `run_metadata.json` status is `completed`.
