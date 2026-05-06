@@ -620,3 +620,63 @@ Important checkpoint note:
   partial/resumable checkpoints from currently running Hard/GRU jobs. Use
   `run_metadata.json` status, not `latest.pt` count alone, to decide what is
   complete.
+
+### 2026-05-06 01:38 PDT Final Reduced-Sweep Snapshot
+
+SSH access through the `hpc2` control socket is working. Checked `squeue`,
+`run_metadata.json`, `metrics.jsonl`, checkpoints, and local download state.
+
+Slurm queue:
+
+- No active jobs for this user at the snapshot.
+
+Reduced sweep status:
+
+- Completed full runs: 44 of 45.
+- Failed runs: 1.
+- Running: 0.
+- Pending: 0.
+
+Completed matrix:
+
+- `RepeatPreviousEasy-v0`
+  - `gru`: 5/5 completed.
+  - `s3m`: 4/5 completed.
+  - `s5`: 5/5 completed.
+- `RepeatPreviousMedium-v0`
+  - `gru`: 5/5 completed.
+  - `s3m`: 5/5 completed.
+  - `s5`: 5/5 completed.
+- `RepeatPreviousHard-v0`
+  - `gru`: 5/5 completed.
+  - `s3m`: 5/5 completed.
+  - `s5`: 5/5 completed.
+
+Only failed run:
+
+- `RepeatPreviousEasy-v0 / s3m / seed4`
+- Failed around step `105675` with CUDA OOM at `batch_size=384` during
+  imagination rollout:
+
+```text
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 7.50 GiB.
+GPU 0 has a total capacity of 79.18 GiB ... 2.49 GiB is free.
+```
+
+Local checkpoint download:
+
+- Final `latest.pt` checkpoints downloaded locally: 44.
+- Metadata files downloaded locally: 45.
+- Local manifest regenerated with 44 completed rows:
+
+```text
+checkpoints/repeat_previous_reduced_20260504_004958/CHECKPOINT_MANIFEST.tsv
+```
+
+Download note:
+
+- A broad rsync briefly started copying periodic `checkpoint_*.pt` files and was
+  stopped to avoid a multi-GB transfer. The final download intentionally synced
+  `latest.pt`, config, metadata, metrics, and console logs only. A few local
+  numbered checkpoint files may remain from the interrupted broad sync, but the
+  manifest indexes only completed final `latest.pt` checkpoints.
