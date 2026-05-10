@@ -37,7 +37,7 @@ Switching world-model backbones:
 
 ```bash
 # Choose a backbone via model.backbone:
-# gru|rssm|transformer|storm|mamba|mamba2|s4|s3m|s5
+# gru|rssm|transformer|storm|mamba2|s4|s3m|s5
 python3 train.py model.backbone=transformer
 ```
 
@@ -92,7 +92,7 @@ python3 train.py env=atari100k model.backbone=transformer env.task=atari_pong
 
 # BSuite memory diagnostics
 python3 train.py env=bsuite_memory_len model.backbone=s5
-python3 train.py env=bsuite_memory_size model.backbone=mamba
+python3 train.py env=bsuite_memory_size model.backbone=mamba2
 python3 train.py env=bsuite_discounting_chain model.backbone=transformer
 
 # POPGym memory tasks

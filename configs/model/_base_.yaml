@@ -7,7 +7,7 @@ compile: True
 log_grads: False
 device: ${device}
 rep_loss: "r2dreamer" # r2dreamer/dreamer/infonce/dreamerpro
-backbone: "gru" # gru/rssm/transformer/storm/mamba/mamba2/s4/s3m/s5
+backbone: "gru" # gru/rssm/transformer/storm/mamba2/s4/s3m/s5
 
 lr: 4e-5
 agc: 0.3
@@ -80,10 +80,10 @@ rssm:
   device: ${device}
   # When false, the categorical posterior depends only on the encoded
   # observation q(z_t | o_t) (STORM/TWISTER-style), and CategoricalRSSM.observe
-  # dispatches to a parallel transformer forward over the whole segment.
-  # Recommended: true for GRU/S4/S5; false for transformer (and Mamba-2 once
-  # the parallel-scan kernel is wired in).
-  recurrent_posterior: true
+  # dispatches to a parallel backbone forward over the whole segment.
+  # Auto-resolves to false for transformer/storm/mamba2; true otherwise. CLI
+  # overrides win as usual (e.g. `model.rssm.recurrent_posterior=true`).
+  recurrent_posterior: ${default_recurrent_posterior:${model.backbone}}
 
 transformer:
   tokens: 8
@@ -92,11 +92,13 @@ transformer:
   ff_mult: 4
   detach_memory: false
 
-mamba:
-  tokens: 8
+mamba2:
   layers: 2
+  d_state: 128
+  d_conv: 4
+  headdim: 64
   expand: 2
-  conv_kernel: 3
+  chunk_size: 64
 
 s4:
   tokens: 8

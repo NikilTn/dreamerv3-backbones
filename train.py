@@ -6,6 +6,7 @@ import warnings
 
 import hydra
 import torch
+from omegaconf import OmegaConf
 
 import tools
 from buffer import Buffer
@@ -17,6 +18,18 @@ warnings.filterwarnings("ignore")
 sys.path.append(str(pathlib.Path(__file__).parent))
 # torch.backends.cudnn.benchmark = True
 torch.set_float32_matmul_precision("high")
+
+# Backbones with a parallel `forward_parallel` path get `recurrent_posterior=False`
+# by default so CategoricalRSSM.observe dispatches to the parallel scan. CLI
+# overrides (e.g. `model.rssm.recurrent_posterior=true`) still win.
+_PARALLEL_BACKBONES = {"transformer", "storm", "mamba2"}
+
+
+def _default_recurrent_posterior(backbone: str) -> bool:
+    return str(backbone).lower() not in _PARALLEL_BACKBONES
+
+
+OmegaConf.register_new_resolver("default_recurrent_posterior", _default_recurrent_posterior, replace=True)
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="configs")

@@ -1,5 +1,5 @@
 from rssm import RSSM as GRURSSM
-from rssm_mamba import RSSM as MambaRSSM
+from rssm_mamba2 import RSSM as Mamba2RSSM
 from rssm_s4 import RSSM as S4RSSM
 from rssm_s5 import RSSM as S5RSSM
 from rssm_transformer import RSSM as TransformerRSSM
@@ -10,8 +10,7 @@ BACKBONES = {
     "rssm": GRURSSM,
     "transformer": TransformerRSSM,
     "storm": TransformerRSSM,
-    "mamba": MambaRSSM,
-    "mamba2": MambaRSSM,
+    "mamba2": Mamba2RSSM,
     "s4": S4RSSM,
     "s3m": S4RSSM,
     "s5": S5RSSM,
@@ -22,8 +21,7 @@ BACKBONE_CONFIGS = {
     "rssm": "rssm",
     "transformer": "transformer",
     "storm": "transformer",
-    "mamba": "mamba",
-    "mamba2": "mamba",
+    "mamba2": "mamba2",
     "s4": "s4",
     "s3m": "s4",
     "s5": "s5",

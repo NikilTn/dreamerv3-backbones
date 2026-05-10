@@ -124,7 +124,7 @@ def make_test_config(backbone):
                 "device": "cpu",
             },
             "transformer": {"tokens": 4, "layers": 1, "heads": 2, "ff_mult": 2},
-            "mamba": {"tokens": 4, "layers": 1, "expand": 2, "conv_kernel": 3},
+            "mamba2": {"layers": 1, "d_state": 4, "d_conv": 3, "headdim": 8, "expand": 2, "chunk_size": 4},
             "s4": {"tokens": 4, "layers": 1, "state_size": 8},
             "s5": {"tokens": 4, "layers": 1, "heads": 2, "state_size": 8},
             "encoder": {
@@ -252,7 +252,7 @@ def make_batch(batch_size, length, act_dim):
 class BackboneSmokeTest(unittest.TestCase):
     def test_backbones_execute_on_cpu(self):
         obs_space, act_space = make_spaces()
-        for backbone in ("gru", "transformer", "mamba", "mamba2", "s4", "s3m", "s5"):
+        for backbone in ("gru", "transformer", "mamba2", "s4", "s3m", "s5"):
             with self.subTest(backbone=backbone):
                 config = make_test_config(backbone)
                 agent = Dreamer(config, obs_space, act_space).to("cpu")

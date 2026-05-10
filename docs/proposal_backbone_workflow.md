@@ -33,7 +33,7 @@ Implemented files:
 - `rssm_base.py`
 - `rssm.py`
 - `rssm_transformer.py`
-- `rssm_mamba.py`
+- `rssm_mamba2.py`
 - `rssm_s4.py`
 - `rssm_s5.py`
 

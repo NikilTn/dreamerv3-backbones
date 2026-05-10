@@ -21,3 +21,6 @@ pre-commit==4.3.0
 gym==0.26.2 # required for memory_maze
 wandb==0.19.1
 matplotlib==3.10.8
+# Optional: enables the Triton SSD fast path for the mamba2 backbone on CUDA hosts.
+# The pure-PyTorch fallback in rssm_mamba2.py is used when this isn't installed.
+mamba-ssm>=2.2.2 ; sys_platform == "linux" and platform_machine == "x86_64"
