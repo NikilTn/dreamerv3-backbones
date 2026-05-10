@@ -84,6 +84,7 @@ transformer:
   layers: 2
   heads: 4
   ff_mult: 4
+  detach_memory: false
 
 mamba:
   tokens: 8
