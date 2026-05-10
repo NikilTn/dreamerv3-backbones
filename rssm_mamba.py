@@ -49,7 +49,13 @@ class MambaDeter(nn.Module):
         )
         self.output_norm = nn.RMSNorm(self.token_dim, eps=1e-04, dtype=torch.float32)
 
-    def forward(self, stoch, deter, action):
+    def initial_memory(self, batch_size):
+        return torch.zeros(batch_size, 0, dtype=torch.float32, device=next(self.parameters()).device)
+
+    def reset_memory(self, memory, reset):
+        return memory
+
+    def forward(self, stoch, deter, memory, action):
         batch_size = action.shape[0]
         action = action / torch.clip(torch.abs(action), min=1.0).detach()
         new_token = self.input_proj(torch.cat([stoch.reshape(batch_size, -1), action], dim=-1)).unsqueeze(1)
@@ -58,7 +64,7 @@ class MambaDeter(nn.Module):
         for block in self.blocks:
             tokens = block(tokens)
         tokens = self.output_norm(tokens)
-        return tokens.reshape(batch_size, -1)
+        return tokens.reshape(batch_size, -1), memory
 
 
 class RSSM(CategoricalRSSM):

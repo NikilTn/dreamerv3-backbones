@@ -286,28 +286,33 @@ class Dreamer(nn.Module):
         p_obs = self.preprocess(obs)
         # (B, E)
         embed = self._frozen_encoder(p_obs)
-        prev_stoch, prev_deter, prev_action = (
+        prev_stoch, prev_deter, prev_memory, prev_action = (
             state["stoch"],
             state["deter"],
+            state["memory"],
             state["prev_action"],
         )
-        # (B, S, K), (B, D)
-        stoch, deter, _ = self._frozen_rssm.obs_step(prev_stoch, prev_deter, prev_action, embed, obs["is_first"])
+        # (B, S, K), (B, D), (B, M, ...)
+        stoch, deter, memory, _ = self._frozen_rssm.obs_step(
+            prev_stoch, prev_deter, prev_memory, prev_action, embed, obs["is_first"]
+        )
         # (B, F)
         feat = self._frozen_rssm.get_feat(stoch, deter)
         action_dist = self._frozen_actor(feat)
         # (B, A)
         action = action_dist.mode if eval else action_dist.rsample()
         return action, TensorDict(
-            {"stoch": stoch, "deter": deter, "prev_action": action},
+            {"stoch": stoch, "deter": deter, "memory": memory, "prev_action": action},
             batch_size=state.batch_size,
         )
 
     @torch.no_grad()
     def get_initial_state(self, B):
-        stoch, deter = self.rssm.initial(B)
+        stoch, deter, memory = self.rssm.initial(B)
         action = torch.zeros(B, self.act_dim, dtype=torch.float32, device=self.device)
-        return TensorDict({"stoch": stoch, "deter": deter, "prev_action": action}, batch_size=(B,))
+        return TensorDict(
+            {"stoch": stoch, "deter": deter, "memory": memory, "prev_action": action}, batch_size=(B,)
+        )
 
     @torch.no_grad()
     def video_pred(self, data, initial):
@@ -324,17 +329,18 @@ class Dreamer(nn.Module):
         # (B, T, E)
         embed = self.encoder(data)
 
-        post_stoch, post_deter, _ = self.rssm.observe(
+        post_stoch, post_deter, post_memory, _ = self.rssm.observe(
             embed[:B, :5],
             data["action"][:B, :5],
             tuple(val[:B] for val in initial),
             data["is_first"][:B, :5],
         )
         recon = self.decoder(post_stoch, post_deter)["image"].mode()[:B]
-        init_stoch, init_deter = post_stoch[:, -1], post_deter[:, -1]
-        prior_stoch, prior_deter = self.rssm.imagine_with_action(
+        init_stoch, init_deter, init_memory = post_stoch[:, -1], post_deter[:, -1], post_memory[:, -1]
+        prior_stoch, prior_deter, _ = self.rssm.imagine_with_action(
             init_stoch,
             init_deter,
+            init_memory,
             data["action"][:B, 5:],
         )
         openl = self.decoder(prior_stoch, prior_deter)["image"].mode()
@@ -409,7 +415,9 @@ class Dreamer(nn.Module):
         # (B, T, E)
         embed = self.encoder(data)
         # (B, T, S, K), (B, T, D), (B, T, S, K)
-        post_stoch, post_deter, post_logit = self.rssm.observe(embed, data["action"], initial, data["is_first"])
+        post_stoch, post_deter, post_memory, post_logit = self.rssm.observe(
+            embed, data["action"], initial, data["is_first"]
+        )
         # (B, T, S, K)
         _, prior_logit = self.rssm.prior(post_deter)
         dyn_loss, rep_loss = self.rssm.kl_loss(post_logit, prior_logit, self.kl_free)
@@ -461,7 +469,7 @@ class Dreamer(nn.Module):
                 ema_proj = self.ema_proj(data_aug)
 
             embed_aug = self.encoder(data_aug)
-            post_stoch_aug, post_deter_aug, _ = self.rssm.observe(
+            post_stoch_aug, post_deter_aug, _, _ = self.rssm.observe(
                 embed_aug, data_aug["action"], initial_aug, data_aug["is_first"]
             )
             proto_losses = self.proto_loss(post_stoch_aug, post_deter_aug, embed_aug, ema_proj)
@@ -469,7 +477,7 @@ class Dreamer(nn.Module):
         else:
             raise NotImplementedError
         if self.cpc_enabled:
-            losses["cpc"] = self.cpc_loss(data, feat, post_stoch, post_deter)
+            losses["cpc"] = self.cpc_loss(data, feat, post_stoch, post_deter, post_memory)
 
         # reward and continue
         losses["rew"] = torch.mean(-self.reward(feat).log_prob(to_f32(data["reward"])))
@@ -482,12 +490,19 @@ class Dreamer(nn.Module):
         # === Imagination rollout for actor-critic ===
         # (B*T, S, K), (B*T, D)
         if policy_start is None:
+            flat = post_stoch.shape[0] * post_stoch.shape[1]
             start = (
-                post_stoch.reshape(-1, *post_stoch.shape[2:]).detach(),
-                post_deter.reshape(-1, *post_deter.shape[2:]).detach(),
+                post_stoch.reshape(flat, *post_stoch.shape[2:]).detach(),
+                post_deter.reshape(flat, *post_deter.shape[2:]).detach(),
+                post_memory.reshape(flat, *post_memory.shape[2:]).detach(),
             )
         else:
-            start = (policy_start[0].detach(), policy_start[1].detach())
+            policy_memory = (
+                policy_start[2].detach()
+                if len(policy_start) > 2
+                else self.rssm._deter_net.initial_memory(policy_start[0].shape[0])
+            )
+            start = (policy_start[0].detach(), policy_start[1].detach(), policy_memory)
         # (B, T, ...) -> (B*T, ...)
         imag_feat, imag_action = self._imagine(start, self.imag_horizon + 1)
         imag_feat, imag_action = imag_feat.detach(), imag_action.detach()
@@ -580,10 +595,10 @@ class Dreamer(nn.Module):
     @torch.no_grad()
     def _imagine(self, start, imag_horizon):
         """Roll out the policy in latent space."""
-        # (B, S, K), (B, D)
+        # (B, S, K), (B, D), (B, M, ...)
         feats = []
         actions = []
-        stoch, deter = start
+        stoch, deter, memory = start
         for _ in range(imag_horizon):
             # (B, F)
             feat = self._frozen_rssm.get_feat(stoch, deter)
@@ -592,7 +607,7 @@ class Dreamer(nn.Module):
             # Append feat and its corresponding sampled action at the same time step.
             feats.append(feat)
             actions.append(action)
-            stoch, deter = self._frozen_rssm.img_step(stoch, deter, action)
+            stoch, deter, memory = self._frozen_rssm.img_step(stoch, deter, memory, action)
 
         # Stack along sequence dim T_imag.
         # (B, T_imag, F), (B, T_imag, A)
@@ -613,7 +628,7 @@ class Dreamer(nn.Module):
             out.append(interm[:, i] + live[:, i] * cont[:, i] * out[-1])
         return torch.stack(list(reversed(out))[:-1], 1)
 
-    def cpc_loss(self, data, feat, post_stoch, post_deter):
+    def cpc_loss(self, data, feat, post_stoch, post_deter, post_memory):
         """Action-conditioned CPC over real latent states and augmented encodings."""
         aug_data = self.augment_cpc_data(data)
         target_embed = self.encoder(aug_data)
@@ -626,7 +641,9 @@ class Dreamer(nn.Module):
                 pred_feat = feat
                 target = target_embed
             else:
-                pred_feat = self.rollout_actions(post_stoch[:, : T - k], post_deter[:, : T - k], data["action"], k)
+                pred_feat = self.rollout_actions(
+                    post_stoch[:, : T - k], post_deter[:, : T - k], post_memory[:, : T - k], data["action"], k
+                )
                 target = target_embed[:, k:]
 
             pred = self.cpc_pred_heads[k](pred_feat.reshape(-1, pred_feat.shape[-1]))
@@ -639,14 +656,16 @@ class Dreamer(nn.Module):
 
         return torch.stack(losses).mean()
 
-    def rollout_actions(self, stoch, deter, actions, horizon):
+    def rollout_actions(self, stoch, deter, memory, actions, horizon):
         """Roll out the world model for `horizon` real actions from every valid start state."""
         B, valid_steps = stoch.shape[:2]
-        stoch = stoch.reshape(-1, *stoch.shape[2:])
-        deter = deter.reshape(-1, deter.shape[-1])
+        flat = B * valid_steps
+        stoch = stoch.reshape(flat, *stoch.shape[2:])
+        deter = deter.reshape(flat, deter.shape[-1])
+        memory = memory.reshape(flat, *memory.shape[2:])
         for step in range(horizon):
             action = actions[:, step : step + valid_steps].reshape(-1, actions.shape[-1])
-            stoch, deter = self.rssm.img_step(stoch, deter, action)
+            stoch, deter, memory = self.rssm.img_step(stoch, deter, memory, action)
         feat = self.rssm.get_feat(stoch, deter)
         return feat.reshape(B, valid_steps, -1)
 

@@ -78,6 +78,11 @@ rssm:
   unimix_ratio: 0.01
   initial: 'learned'
   device: ${device}
+  # When false, the categorical posterior depends only on the encoded
+  # observation q(z_t | o_t) (STORM/TWISTER-style), and CategoricalRSSM.observe
+  # dispatches to a parallel transformer forward over the whole segment.
+  # Recommended: true for GRU/S4/S5; false for transformer (and Mamba-2 once
+  # the parallel-scan kernel is wired in).
   recurrent_posterior: true
 
 transformer:

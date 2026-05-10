@@ -10,8 +10,10 @@ from tools import rpad, weight_init_
 class CategoricalRSSM(nn.Module):
     """Shared categorical Dreamer-style RSSM scaffold.
 
-    Subclasses only need to provide a deterministic transition module that maps
-    `(stoch, deter, action) -> next_deter`.
+    Subclasses provide a deterministic transition module that maps
+    `(stoch, deter, memory, action) -> (next_deter, next_memory)` and an
+    `initial_memory(batch_size)` method. Backbones with no auxiliary cache
+    return an empty `(B, 0)` tensor and a no-op pass-through for memory.
     """
 
     def __init__(self, config, embed_size, act_dim, deter_net):
@@ -60,47 +62,88 @@ class CategoricalRSSM(nn.Module):
         self.apply(weight_init_)
 
     def initial(self, batch_size):
-        """Return an initial latent state."""
+        """Return an initial latent state (stoch, deter, memory)."""
         deter = torch.zeros(batch_size, self._deter, dtype=torch.float32, device=self._device)
         stoch = torch.zeros(batch_size, self._stoch, self._discrete, dtype=torch.float32, device=self._device)
-        return stoch, deter
+        memory = self._deter_net.initial_memory(batch_size)
+        return stoch, deter, memory
 
     def observe(self, embed, action, initial, reset):
-        """Posterior rollout using observations."""
+        """Posterior rollout using observations.
+
+        Dispatches to a parallel implementation when the posterior does not
+        depend on `deter` (`recurrent_posterior=False`) AND the backbone exposes
+        a `forward_parallel` method. Otherwise falls back to the per-step loop.
+        """
+        if len(initial) == 2:
+            stoch_init, deter_init = initial
+            memory_init = self._deter_net.initial_memory(stoch_init.shape[0])
+        else:
+            stoch_init, deter_init, memory_init = initial
+
+        if (not self._recurrent_posterior) and hasattr(self._deter_net, "forward_parallel"):
+            return self._observe_parallel(embed, action, stoch_init, deter_init, memory_init, reset)
+
         length = action.shape[1]
-        stoch, deter = initial
-        stochs, deters, logits = [], [], []
+        stoch, deter, memory = stoch_init, deter_init, memory_init
+        stochs, deters, memories, logits = [], [], [], []
         for i in range(length):
-            stoch, deter, logit = self.obs_step(stoch, deter, action[:, i], embed[:, i], reset[:, i])
+            stoch, deter, memory, logit = self.obs_step(stoch, deter, memory, action[:, i], embed[:, i], reset[:, i])
             stochs.append(stoch)
             deters.append(deter)
+            memories.append(memory)
             logits.append(logit)
         stochs = torch.stack(stochs, dim=1)
         deters = torch.stack(deters, dim=1)
+        memories = torch.stack(memories, dim=1)
         logits = torch.stack(logits, dim=1)
-        return stochs, deters, logits
+        return stochs, deters, memories, logits
 
-    def obs_step(self, stoch, deter, prev_action, embed, reset):
+    def _observe_parallel(self, embed, action, stoch_init, deter_init, memory_init, reset):
+        """Parallel posterior rollout for non-recurrent posterior backbones.
+
+        Steps:
+            1. Sample all stochs in one shot from q(z_t | o_t).
+            2. Build (prev_stoch, prev_action) sequences by shifting the sampled
+               stochs and the given actions by one step, with the initial state
+               at position 0.
+            3. Call backbone.forward_parallel to get per-position deters and
+               memory snapshots.
+        """
+        B, T = action.shape[:2]
+        # Sample posteriors for the whole segment in parallel.
+        post_logit = self._obs_net(embed)  # (B, T, S, K)
+        stochs = self.get_dist(post_logit).rsample()
+
+        # Build prev_stoch / prev_action sequences (shifted by 1).
+        prev_stoch = torch.cat([stoch_init.unsqueeze(1), stochs[:, :-1]], dim=1)
+        prev_action = torch.cat([torch.zeros_like(action[:, :1]), action[:, :-1]], dim=1)
+
+        deter_seq, memory_seq = self._deter_net.forward_parallel(prev_stoch, prev_action, memory_init, reset)
+        return stochs, deter_seq, memory_seq, post_logit
+
+    def obs_step(self, stoch, deter, memory, prev_action, embed, reset):
         """Single posterior step."""
         stoch = torch.where(rpad(reset, stoch.dim() - int(reset.dim())), torch.zeros_like(stoch), stoch)
         deter = torch.where(rpad(reset, deter.dim() - int(reset.dim())), torch.zeros_like(deter), deter)
+        memory = self._deter_net.reset_memory(memory, reset)
         prev_action = torch.where(
             rpad(reset, prev_action.dim() - int(reset.dim())), torch.zeros_like(prev_action), prev_action
         )
 
-        deter = self._deter_net(stoch, deter, prev_action)
+        deter, memory = self._deter_net(stoch, deter, memory, prev_action)
         if self._recurrent_posterior:
             logit = self._obs_net(torch.cat([deter, embed], dim=-1))
         else:
             logit = self._obs_net(embed)
         stoch = self.get_dist(logit).rsample()
-        return stoch, deter, logit
+        return stoch, deter, memory, logit
 
-    def img_step(self, stoch, deter, prev_action):
+    def img_step(self, stoch, deter, memory, prev_action):
         """Single prior step without observation."""
-        deter = self._deter_net(stoch, deter, prev_action)
+        deter, memory = self._deter_net(stoch, deter, memory, prev_action)
         stoch, _ = self.prior(deter)
-        return stoch, deter
+        return stoch, deter, memory
 
     def prior(self, deter):
         """Compute prior distribution parameters and sample stochastic state."""
@@ -108,17 +151,19 @@ class CategoricalRSSM(nn.Module):
         stoch = self.get_dist(logit).rsample()
         return stoch, logit
 
-    def imagine_with_action(self, stoch, deter, actions):
+    def imagine_with_action(self, stoch, deter, memory, actions):
         """Roll out prior dynamics given a sequence of actions."""
         length = actions.shape[1]
-        stochs, deters = [], []
+        stochs, deters, memories = [], [], []
         for i in range(length):
-            stoch, deter = self.img_step(stoch, deter, actions[:, i])
+            stoch, deter, memory = self.img_step(stoch, deter, memory, actions[:, i])
             stochs.append(stoch)
             deters.append(deter)
+            memories.append(memory)
         stochs = torch.stack(stochs, dim=1)
         deters = torch.stack(deters, dim=1)
-        return stochs, deters
+        memories = torch.stack(memories, dim=1)
+        return stochs, deters, memories
 
     def get_feat(self, stoch, deter):
         """Flatten stochastic state and concatenate with deterministic state."""

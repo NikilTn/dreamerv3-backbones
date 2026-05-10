@@ -30,8 +30,16 @@ class Deter(nn.Module):
         self._dyn_gru = BlockLinear(in_ch, 3 * deter, self.blocks)
         self.flat2group = lambda x: x.reshape(*x.shape[:-1], self.blocks, -1)
         self.group2flat = lambda x: x.reshape(*x.shape[:-2], -1)
+        self._device = None
 
-    def forward(self, stoch, deter, action):
+    def initial_memory(self, batch_size):
+        device = self._device or next(self.parameters()).device
+        return torch.zeros(batch_size, 0, dtype=torch.float32, device=device)
+
+    def reset_memory(self, memory, reset):
+        return memory
+
+    def forward(self, stoch, deter, memory, action):
         """Deterministic state transition (block-GRU style)."""
         # (B, S, K), (B, D), (B, A)
         B = action.shape[0]
@@ -70,7 +78,8 @@ class Deter(nn.Module):
         cand = torch.tanh(reset * cand)
         update = torch.sigmoid(update - 1)
         # (B, D)
-        return update * cand + (1 - update) * deter
+        new_deter = update * cand + (1 - update) * deter
+        return new_deter, memory
 
 
 class RSSM(CategoricalRSSM):
