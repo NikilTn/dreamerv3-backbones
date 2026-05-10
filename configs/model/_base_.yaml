@@ -78,6 +78,7 @@ rssm:
   unimix_ratio: 0.01
   initial: 'learned'
   device: ${device}
+  recurrent_posterior: true
 
 transformer:
   tokens: 8

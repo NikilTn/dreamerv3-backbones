@@ -27,12 +27,13 @@ class CategoricalRSSM(nn.Module):
         self._act_dim = act_dim
         self._obs_layers = int(config.obs_layers)
         self._img_layers = int(config.img_layers)
+        self._recurrent_posterior = bool(getattr(config, "recurrent_posterior", True))
         self.flat_stoch = self._stoch * self._discrete
         self.feat_size = self.flat_stoch + self._deter
         self._deter_net = deter_net
 
         self._obs_net = nn.Sequential()
-        inp_dim = self._deter + embed_size
+        inp_dim = (self._deter + embed_size) if self._recurrent_posterior else embed_size
         for i in range(self._obs_layers):
             self._obs_net.add_module(f"obs_net_{i}", nn.Linear(inp_dim, self._hidden, bias=True))
             self._obs_net.add_module(f"obs_net_n_{i}", nn.RMSNorm(self._hidden, eps=1e-04, dtype=torch.float32))
@@ -88,7 +89,10 @@ class CategoricalRSSM(nn.Module):
         )
 
         deter = self._deter_net(stoch, deter, prev_action)
-        logit = self._obs_net(torch.cat([deter, embed], dim=-1))
+        if self._recurrent_posterior:
+            logit = self._obs_net(torch.cat([deter, embed], dim=-1))
+        else:
+            logit = self._obs_net(embed)
         stoch = self.get_dist(logit).rsample()
         return stoch, deter, logit
 
