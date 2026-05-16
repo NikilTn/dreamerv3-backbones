@@ -1,0 +1,16 @@
+# Coverage: training and deterministic-eval seeds per task × backbone
+
+| task | backbone | completed_train_seeds | evaluated_seeds | missing_train | missing_eval |
+|---|---|---|---|---|---|
+| Easy | GRU | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Easy | S3M / S4D | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Easy | S5 | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Easy | Transformer-XL | 1/1: [0] | 1/1: [0] | — | — |
+| Medium | GRU | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Medium | S3M / S4D | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Medium | S5 | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Medium | Transformer-XL | 1/1: [0] | 1/1: [0] | — | — |
+| Hard | GRU | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Hard | S3M / S4D | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Hard | S5 | 5/5: [0, 1, 2, 3, 4] | 5/5: [0, 1, 2, 3, 4] | — | — |
+| Hard | Transformer-XL | 1/1: [0] | 1/1: [0] | — | — |

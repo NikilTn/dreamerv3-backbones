@@ -1,0 +1,13 @@
+# Pairwise comparison vs GRU on final training scores. P(backbone > GRU) is the empirical fraction over all (gru_seed, backbone_seed) pairs. Bootstrap CI is over per-pair differences. NOT a significance test.
+
+| task | backbone | n_paired_seeds | mean_diff | P_backbone_gt_gru | ci95_lo_diff | ci95_hi_diff |
+|---|---|---|---|---|---|---|
+| Easy | S3M / S4D | 5 | -0.2167 | 0.080 | -0.2833 | -0.1500 |
+| Easy | S5 | 5 | -0.1667 | 0.160 | -0.2383 | -0.0933 |
+| Easy | Transformer-XL | 1 | -0.1417 | 0.200 | -0.2667 | -0.0167 |
+| Medium | S3M / S4D | 5 | 0.0500 | 0.760 | 0.0089 | 0.0922 |
+| Medium | S5 | 5 | 0.0278 | 0.640 | -0.0133 | 0.0711 |
+| Medium | Transformer-XL | 1 | -0.0167 | 0.400 | -0.0778 | 0.0556 |
+| Hard | S3M / S4D | 5 | 0.0739 | 0.640 | 0.0217 | 0.1261 |
+| Hard | S5 | 5 | 0.0696 | 0.680 | 0.0226 | 0.1165 |
+| Hard | Transformer-XL | 1 | -0.0217 | 0.400 | -0.0826 | 0.0348 |

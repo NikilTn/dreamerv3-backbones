@@ -745,3 +745,125 @@ Use `analysis_completed_only`, not `analysis_44_completed`, for paper/PPT
 tables. The first analysis folder included the failed partial Easy/S3M seed4
 metrics because the run still had `metrics.jsonl`; the completed-only folder
 filters to runs whose `run_metadata.json` status is `completed`.
+
+### 2026-05-07 A100 Transformer Scope Reduction
+
+The Vast/standalone A100 machine is running the Transformer backbone under:
+
+```text
+/workspace/dreamerv3
+tmux: transformer_medium_hard_seed0_20260507
+```
+
+The original 15-run Transformer queue was reduced to one seed per difficulty.
+
+Completed before reduction:
+
+- `RepeatPreviousEasy-v0 / transformer / seed0`
+- Runtime: about 22.77 hours
+- Checkpoints: `checkpoint_000100000.pt` through
+  `checkpoint_001000000.pt`, plus `latest.pt`
+
+Stopped intentionally:
+
+- `RepeatPreviousEasy-v0 / transformer / seed1`
+- Progress at check: about 38%
+- Reason: below the 50% cutoff; Easy already had a completed Transformer seed0.
+- Metadata status was marked:
+  `stopped_below_50pct_by_user_request`
+
+Replacement queue:
+
+```text
+joblists/transformer_medium_hard_seed0_bs128_eager_20260507.txt
+```
+
+Runs in that queue:
+
+- `RepeatPreviousMedium-v0 / transformer / seed0`
+- `RepeatPreviousHard-v0 / transformer / seed0`
+
+Transformer settings:
+
+- `batch_size=128`
+- `batch_length=128`
+- `env.env_num=4`
+- `trainer.burn_in=8`
+- `model.transformer.cache_length=128`
+- `model.compile=False`
+
+Notes:
+
+- Larger Transformer batches were tested and failed on the A100:
+  `batch_size=384` and `batch_size=256` both OOMed.
+- `torch.compile=True` stalled at the first update, so eager mode is used.
+
+### 2026-05-09 A100 Transformer Reduced Queue Completed
+
+The reduced one-seed-per-difficulty Transformer plan completed on the A100.
+
+Completed runs:
+
+| Task | Backbone | Seed | Status | Elapsed | Last step | Last FPS |
+|---|---:|---:|---|---:|---:|---:|
+| `popgym_RepeatPreviousEasy-v0` | transformer | 0 | completed | 22.77 h | 999,807 | 12.478 |
+| `popgym_RepeatPreviousMedium-v0` | transformer | 0 | completed | 23.23 h | 999,927 | 11.794 |
+| `popgym_RepeatPreviousHard-v0` | transformer | 0 | completed | 23.66 h | 999,443 | 11.843 |
+
+The partial `Easy / transformer / seed1` run remains intentionally marked as:
+
+```text
+stopped_below_50pct_by_user_request
+```
+
+It stopped at about 380k steps after the scope was reduced to one seed per
+difficulty.
+
+Remote output root:
+
+```text
+/workspace/dreamerv3/logdir/transformer_repeat_previous_a100_bs128_eager_20260506
+```
+
+The A100 was idle after completion; no Transformer training process remained.
+
+### 2026-05-10 HPC Final Checkpoint Sync
+
+Verified the persistent SSH control socket to `coe-hpc2` was working.
+
+The final HPC rerun completed:
+
+- `RepeatPreviousEasy-v0 / s3m / seed4`
+- Remote run directory:
+
+```text
+logdir/repeat_previous_reduced_20260504_004958_reruns/popgym_repeat_previous/none/popgym_RepeatPreviousEasy-v0/s3m/seed4_bs256
+```
+
+Copied the final rerun artifacts into the local offline checkpoint tree:
+
+```text
+checkpoints/repeat_previous_reduced_20260504_004958/full_runs/popgym_repeat_previous/none/popgym_RepeatPreviousEasy-v0/s3m/seed4
+```
+
+Copied files:
+
+- `latest.pt`
+- `run_metadata.json`
+- `metrics.jsonl`
+- `console.log`
+- `resolved_config.yaml`
+- `resolved_config.json`
+
+Regenerated:
+
+```text
+checkpoints/repeat_previous_reduced_20260504_004958/CHECKPOINT_MANIFEST.tsv
+```
+
+Final production checkpoint sync status:
+
+- Remote completed final `latest.pt` checkpoints: 45
+- Local completed final `latest.pt` checkpoints: 45
+- Missing locally: 0
+- Size mismatches: 0
